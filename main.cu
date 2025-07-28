@@ -1377,7 +1377,9 @@ int main(int argc, char* argv[]) {
         // Parse grid configuration
         int blocks = (argc >= 5) ? std::stoi(argv[4]) : 32;
         int threads = (argc >= 6) ? std::stoi(argv[5]) : 32;
-        
+        int device = (argc >= 7) ? std::stoi(argv[6]) : 0;
+		printf("device ID: %d\n", device);
+		cudaSetDevice(device);
         printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
                blocks, threads, blocks * threads);
         
