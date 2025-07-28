@@ -12,6 +12,14 @@ main.exe 1000000000000000000 1ffffffffffffffffff 105b7f253f0ebd7843adaebbd805c94
 main.exe 1000000000000000000000000000000000000000 1fffffffffffffffffffffffffffffffffffffff 242d790e5a168043c76f0539fd894b73ee67b3b3 - puzzle 157\
 main.exe 10000000000000000000 1fffffffffffffffffff 783c138ac81f6a52398564bb17455576e8525b29 - puzzle 77
 
+# NOTE
+
+you set the amount of blocks and threads like this:
+
+main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32 - 32 blocks x 32 threads = 1024 threads
+main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 64 64
+main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 256 256 
+
 # Compile with:
 
 nvcc -o main main.cu
