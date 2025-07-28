@@ -16,9 +16,8 @@ main.exe 10000000000000000000 1fffffffffffffffffff 783c138ac81f6a52398564bb17455
 
 you set the amount of blocks and threads like this:
 
-main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32 - 32 blocks x 32 threads = 1024 threads
-main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 64 64
-main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 256 256 
+###  32 blocks x 32 threads = 1024 threads
+main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32
 
 # Compile with:
 
