@@ -18,6 +18,26 @@ nvcc -o main main.cu
 
 # USE ONLY THE PUZZLES THAT START WITH 1
 
+## I'll explain how the transformation works:
+
+1) a base random number is generated
+2) it is converted into a binary like "110011"
+3) a shift to the left is made (a full circle)
+4) at each shift of 1 bit, a vertical circle is made 16 times in hex from 0 to F
+5) a binary is flipped
+6) bits are inverted
+7) all this is done in cycles nested within each other
+
+all these operations occur in thousands of threads, the more powerful the GPU, the more parallel transformations
+
+all keys within one full transformation are unique, there are no repetitions.... unless the base number itself is repeated (which is unlikely on large ranges)
+
+proof that it works, you can check it on short puzzles, it works like a clock, on large ranges it will take more time of course, but this is a chance to try your luck in a different style
+
+this algorithm is available both on python (CPU), and on GPU
+
+I believe this is an effective way to search
+
 Author Telegram: https://t.me/nmn5436
 
 Donate: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk
