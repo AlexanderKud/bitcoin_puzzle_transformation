@@ -21,3 +21,7 @@ nvcc -o main main.cu
 Author Telegram: https://t.me/nmn5436
 
 Donate: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk
+
+# NOTE
+
+the CPU version is here https://github.com/puzzleman22/Bitcoin-puzzle-transformations-CPU
