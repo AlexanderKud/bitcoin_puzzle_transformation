@@ -22,9 +22,9 @@ nvcc -o main main.cu
 
 1) a base random number is generated
 2) it is converted into a binary like "110011"
-3) a shift to the left is made (a full circle)
-4) at each shift of 1 bit, a vertical circle is made 16 times in hex from 0 to F
-5) a binary is flipped
+3) a shift to the left is made (a full cycle)
+4) at each shift of 1 bit, a vertical cycle is made 16 times in hex from 0 to F
+5) a binary is reversed
 6) bits are inverted
 7) all this is done in cycles nested within each other
 
