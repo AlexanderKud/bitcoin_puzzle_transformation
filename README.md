@@ -45,8 +45,10 @@ this algorithm is available both on python (CPU), and on GPU
 
 I believe this is an effective way to search
 
+# for questions and other things
 Author Telegram: https://t.me/nmn5436
 
+if you liked this idea or found something
 Donate: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk
 
 # NOTE
