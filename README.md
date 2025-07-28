@@ -53,4 +53,6 @@ bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk
 
 # NOTE
 
+join our TG group https://t.me/bitcoin_transformation
+
 the CPU version is here https://github.com/puzzleman22/Bitcoin-puzzle-transformations-CPU
