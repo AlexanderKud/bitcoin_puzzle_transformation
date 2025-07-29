@@ -1,4 +1,3 @@
-//Author telegram: https://t.me/nmn5436
 #include "secp256k1.cuh"
 #include <iostream>
 #include <vector>
@@ -707,165 +706,7 @@ __device__ void hash160_to_hex(uint8_t* hash, char* hex_str) {
     hex_str[40] = '\0';
 }
 
-#define HEX_LENGTH 64  // 64 hex characters
 
-// Optimized hex rotation functions
-__device__ __forceinline__ void hex_rotate_right_by_one(char* hex_str) {
-    int actual_length = 0;
-    #pragma unroll 8
-    for (int i = 0; i < HEX_LENGTH; i++) {
-        if (hex_str[i] == '\0') {
-            actual_length = i;
-            break;
-        }
-    }
-    if (actual_length == 0) {
-        actual_length = HEX_LENGTH;
-    }
-    
-    if (actual_length <= 1) return;
-    
-    // Find the first occurrence of '1'
-    int first_one = -1;
-    for (int i = 0; i < actual_length; i++) {
-        if (hex_str[i] == '1') {
-            first_one = i;
-            break;
-        }
-    }
-    
-    if (first_one == -1 || first_one >= actual_length - 1) return;
-    
-    int rotation_start = first_one + 1;
-    int rotation_length = actual_length - rotation_start;
-    
-    if (rotation_length <= 1) return;
-    
-    char last_char = hex_str[rotation_start + rotation_length - 1];
-    
-    // Use memmove for better performance
-    for (int i = rotation_length - 1; i > 0; i--) {
-        hex_str[rotation_start + i] = hex_str[rotation_start + i - 1];
-    }
-    
-    hex_str[rotation_start] = last_char;
-}
-
-__device__ __forceinline__ void hex_rotate_left_by_one(char* hex_str) {
-    int actual_length = 0;
-    #pragma unroll 8
-    for (int i = 0; i < HEX_LENGTH; i++) {
-        if (hex_str[i] == '\0') {
-            actual_length = i;
-            break;
-        }
-    }
-    if (actual_length == 0) {
-        actual_length = HEX_LENGTH;
-    }
-    
-    if (actual_length <= 1) return;
-    
-    int first_one = -1;
-    for (int i = 0; i < actual_length; i++) {
-        if (hex_str[i] == '1') {
-            first_one = i;
-            break;
-        }
-    }
-    
-    if (first_one == -1 || first_one >= actual_length - 1) return;
-    
-    int rotation_start = first_one + 1;
-    int rotation_length = actual_length - rotation_start;
-    
-    if (rotation_length <= 1) return;
-    
-    char first_char = hex_str[rotation_start];
-    
-    for (int i = 0; i < rotation_length - 1; i++) {
-        hex_str[rotation_start + i] = hex_str[rotation_start + i + 1];
-    }
-    
-    hex_str[rotation_start + rotation_length - 1] = first_char;
-}
-
-// Use lookup table for hex increment/decrement
-__constant__ char hex_inc_table[16] = {'1','2','3','4','5','6','7','8','9','a','b','c','d','e','f','0'};
-__constant__ char hex_dec_table[16] = {'f','0','1','2','3','4','5','6','7','8','9','a','b','c','d','e'};
-
-__device__ __forceinline__ char hex_increment(char c) {
-    if (c >= '0' && c <= '9') return hex_inc_table[c - '0'];
-    if (c >= 'a' && c <= 'f') return hex_inc_table[c - 'a' + 10];
-    if (c >= 'A' && c <= 'F') return hex_inc_table[c - 'A' + 10];
-    return c;
-}
-
-__device__ __forceinline__ char hex_decrement(char c) {
-    if (c >= '0' && c <= '9') return hex_dec_table[c - '0'];
-    if (c >= 'a' && c <= 'f') return hex_dec_table[c - 'a' + 10];
-    if (c >= 'A' && c <= 'F') return hex_dec_table[c - 'A' + 10];
-    return c;
-}
-
-__device__ __forceinline__ void hex_vertical_rotate_up(char* hex_str) {
-    int actual_length = 0;
-    #pragma unroll 8
-    for (int i = 0; i < HEX_LENGTH; i++) {
-        if (hex_str[i] == '\0') {
-            actual_length = i;
-            break;
-        }
-    }
-    if (actual_length == 0) actual_length = HEX_LENGTH;
-    
-    if (actual_length <= 1) return;
-    
-    int first_one = -1;
-    for (int i = 0; i < actual_length; i++) {
-        if (hex_str[i] == '1') {
-            first_one = i;
-            break;
-        }
-    }
-    
-    if (first_one == -1 || first_one >= actual_length - 1) return;
-    
-    // Rotate all characters after the first '1' vertically up
-    #pragma unroll 8
-    for (int i = first_one + 1; i < actual_length; i++) {
-        hex_str[i] = hex_increment(hex_str[i]);
-    }
-}
-
-__device__ __forceinline__ void hex_vertical_rotate_down(char* hex_str) {
-    int actual_length = 0;
-    #pragma unroll 8
-    for (int i = 0; i < HEX_LENGTH; i++) {
-        if (hex_str[i] == '\0') {
-            actual_length = i;
-            break;
-        }
-    }
-    if (actual_length == 0) actual_length = HEX_LENGTH;
-    
-    if (actual_length <= 1) return;
-    
-    int first_one = -1;
-    for (int i = 0; i < actual_length; i++) {
-        if (hex_str[i] == '1') {
-            first_one = i;
-            break;
-        }
-    }
-    
-    if (first_one == -1 || first_one >= actual_length - 1) return;
-    
-    #pragma unroll 8
-    for (int i = first_one + 1; i < actual_length; i++) {
-        hex_str[i] = hex_decrement(hex_str[i]);
-    }
-}
 
 __device__ void leftPad64(char* output, const char* suffix) {
     int suffix_len = 0;
@@ -922,27 +763,6 @@ __device__ void reverseAfterFirst1(char* hex) {
     }
 }
 
-__device__ void invertHexAfterFirst1(char* hex) {
-    bool foundFirst1 = false;
-    
-    for (int i = 0; hex[i] != '\0'; i++) {
-        if (!foundFirst1 && hex[i] == '1') {
-            foundFirst1 = true;
-            continue;
-        }
-        
-        if (foundFirst1) {
-            char c = hex[i];
-            int val = hex_char_to_byte(c);
-            
-            // Invert all 4 bits of this hex digit
-            val = (~val) & 0xF;
-            
-            // Convert back to hex char
-            hex[i] = (val < 10) ? ('0' + val) : ('a' + (val - 10));
-        }
-    }
-}
 
 __device__ __forceinline__ int d_strlen(const char* str) {
     int len = 0;
@@ -952,24 +772,7 @@ __device__ __forceinline__ int d_strlen(const char* str) {
     return len;
 }
 
-__device__ void incrementBigInt(BigInt* num) {
-    // Start from the least significant word (data[0])
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        num->data[i]++;
-        
-        // If no overflow, we're done
-        if (num->data[i] != 0) {
-            break;
-        }
-        // If overflow (wrapped to 0), continue to next word
-    }
-}
 
-__device__ void clearLowest8Bits(BigInt* num) {
-    // Clear the lowest 8 bits of the least significant word
-    num->data[0] &= 0xFFFFFF00;
-}
 
 __device__ __forceinline__ uint64_t mix(uint64_t x) {
     x ^= x >> 30;
@@ -1377,13 +1180,10 @@ int main(int argc, char* argv[]) {
         // Parse grid configuration
         int blocks = (argc >= 5) ? std::stoi(argv[4]) : 32;
         int threads = (argc >= 6) ? std::stoi(argv[5]) : 32;
-        int device = (argc >= 7) ? std::stoi(argv[6]) : 0;
-		printf("device ID: %d\n", device);
-		cudaSetDevice(device);
+        
         printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
                blocks, threads, blocks * threads);
         
-		printf("If you liked the program, please donate BTC: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk\nAuthor telegram: https://t.me/nmn5436 \n\n");
         // Launch kernel
         start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
         
@@ -1442,5 +1242,3 @@ int main(int argc, char* argv[]) {
     
     return 0;
 }
-
-//Author telegram: https://t.me/nmn5436
