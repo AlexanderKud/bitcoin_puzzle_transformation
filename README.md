@@ -1,6 +1,7 @@
 # This Bitcoin Puzzle searcher Uses GPU with transformations
 
-<img src="https://raw.githubusercontent.com/puzzleman22/bitcoin_puzzle_transformation/refs/heads/main/cuda_function_flowchart.svg" />
+[https://raw.githubusercontent.com/puzzleman22/bitcoin_puzzle_transformation/refs/heads/main/cuda_function_flowchart.svg
+](https://raw.githubusercontent.com/puzzleman22/bitcoin_puzzle_transformation/refs/heads/main/cuda_function_flowchart.svg)
 
 ## HOW TO USE:
 
