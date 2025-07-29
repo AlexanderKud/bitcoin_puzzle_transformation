@@ -706,7 +706,165 @@ __device__ void hash160_to_hex(uint8_t* hash, char* hex_str) {
     hex_str[40] = '\0';
 }
 
+#define HEX_LENGTH 64  // 64 hex characters
 
+// Optimized hex rotation functions
+__device__ __forceinline__ void hex_rotate_right_by_one(char* hex_str) {
+    int actual_length = 0;
+    #pragma unroll 8
+    for (int i = 0; i < HEX_LENGTH; i++) {
+        if (hex_str[i] == '\0') {
+            actual_length = i;
+            break;
+        }
+    }
+    if (actual_length == 0) {
+        actual_length = HEX_LENGTH;
+    }
+    
+    if (actual_length <= 1) return;
+    
+    // Find the first occurrence of '1'
+    int first_one = -1;
+    for (int i = 0; i < actual_length; i++) {
+        if (hex_str[i] == '1') {
+            first_one = i;
+            break;
+        }
+    }
+    
+    if (first_one == -1 || first_one >= actual_length - 1) return;
+    
+    int rotation_start = first_one + 1;
+    int rotation_length = actual_length - rotation_start;
+    
+    if (rotation_length <= 1) return;
+    
+    char last_char = hex_str[rotation_start + rotation_length - 1];
+    
+    // Use memmove for better performance
+    for (int i = rotation_length - 1; i > 0; i--) {
+        hex_str[rotation_start + i] = hex_str[rotation_start + i - 1];
+    }
+    
+    hex_str[rotation_start] = last_char;
+}
+
+__device__ __forceinline__ void hex_rotate_left_by_one(char* hex_str) {
+    int actual_length = 0;
+    #pragma unroll 8
+    for (int i = 0; i < HEX_LENGTH; i++) {
+        if (hex_str[i] == '\0') {
+            actual_length = i;
+            break;
+        }
+    }
+    if (actual_length == 0) {
+        actual_length = HEX_LENGTH;
+    }
+    
+    if (actual_length <= 1) return;
+    
+    int first_one = -1;
+    for (int i = 0; i < actual_length; i++) {
+        if (hex_str[i] == '1') {
+            first_one = i;
+            break;
+        }
+    }
+    
+    if (first_one == -1 || first_one >= actual_length - 1) return;
+    
+    int rotation_start = first_one + 1;
+    int rotation_length = actual_length - rotation_start;
+    
+    if (rotation_length <= 1) return;
+    
+    char first_char = hex_str[rotation_start];
+    
+    for (int i = 0; i < rotation_length - 1; i++) {
+        hex_str[rotation_start + i] = hex_str[rotation_start + i + 1];
+    }
+    
+    hex_str[rotation_start + rotation_length - 1] = first_char;
+}
+
+// Use lookup table for hex increment/decrement
+__constant__ char hex_inc_table[16] = {'1','2','3','4','5','6','7','8','9','a','b','c','d','e','f','0'};
+__constant__ char hex_dec_table[16] = {'f','0','1','2','3','4','5','6','7','8','9','a','b','c','d','e'};
+
+__device__ __forceinline__ char hex_increment(char c) {
+    if (c >= '0' && c <= '9') return hex_inc_table[c - '0'];
+    if (c >= 'a' && c <= 'f') return hex_inc_table[c - 'a' + 10];
+    if (c >= 'A' && c <= 'F') return hex_inc_table[c - 'A' + 10];
+    return c;
+}
+
+__device__ __forceinline__ char hex_decrement(char c) {
+    if (c >= '0' && c <= '9') return hex_dec_table[c - '0'];
+    if (c >= 'a' && c <= 'f') return hex_dec_table[c - 'a' + 10];
+    if (c >= 'A' && c <= 'F') return hex_dec_table[c - 'A' + 10];
+    return c;
+}
+
+__device__ __forceinline__ void hex_vertical_rotate_up(char* hex_str) {
+    int actual_length = 0;
+    #pragma unroll 8
+    for (int i = 0; i < HEX_LENGTH; i++) {
+        if (hex_str[i] == '\0') {
+            actual_length = i;
+            break;
+        }
+    }
+    if (actual_length == 0) actual_length = HEX_LENGTH;
+    
+    if (actual_length <= 1) return;
+    
+    int first_one = -1;
+    for (int i = 0; i < actual_length; i++) {
+        if (hex_str[i] == '1') {
+            first_one = i;
+            break;
+        }
+    }
+    
+    if (first_one == -1 || first_one >= actual_length - 1) return;
+    
+    // Rotate all characters after the first '1' vertically up
+    #pragma unroll 8
+    for (int i = first_one + 1; i < actual_length; i++) {
+        hex_str[i] = hex_increment(hex_str[i]);
+    }
+}
+
+__device__ __forceinline__ void hex_vertical_rotate_down(char* hex_str) {
+    int actual_length = 0;
+    #pragma unroll 8
+    for (int i = 0; i < HEX_LENGTH; i++) {
+        if (hex_str[i] == '\0') {
+            actual_length = i;
+            break;
+        }
+    }
+    if (actual_length == 0) actual_length = HEX_LENGTH;
+    
+    if (actual_length <= 1) return;
+    
+    int first_one = -1;
+    for (int i = 0; i < actual_length; i++) {
+        if (hex_str[i] == '1') {
+            first_one = i;
+            break;
+        }
+    }
+    
+    if (first_one == -1 || first_one >= actual_length - 1) return;
+    
+    #pragma unroll 8
+    for (int i = first_one + 1; i < actual_length; i++) {
+        hex_str[i] = hex_decrement(hex_str[i]);
+    }
+}
 
 __device__ void leftPad64(char* output, const char* suffix) {
     int suffix_len = 0;
@@ -763,6 +921,27 @@ __device__ void reverseAfterFirst1(char* hex) {
     }
 }
 
+__device__ void invertHexAfterFirst1(char* hex) {
+    bool foundFirst1 = false;
+    
+    for (int i = 0; hex[i] != '\0'; i++) {
+        if (!foundFirst1 && hex[i] == '1') {
+            foundFirst1 = true;
+            continue;
+        }
+        
+        if (foundFirst1) {
+            char c = hex[i];
+            int val = hex_char_to_byte(c);
+            
+            // Invert all 4 bits of this hex digit
+            val = (~val) & 0xF;
+            
+            // Convert back to hex char
+            hex[i] = (val < 10) ? ('0' + val) : ('a' + (val - 10));
+        }
+    }
+}
 
 __device__ __forceinline__ int d_strlen(const char* str) {
     int len = 0;
@@ -772,7 +951,24 @@ __device__ __forceinline__ int d_strlen(const char* str) {
     return len;
 }
 
+__device__ void incrementBigInt(BigInt* num) {
+    // Start from the least significant word (data[0])
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        num->data[i]++;
+        
+        // If no overflow, we're done
+        if (num->data[i] != 0) {
+            break;
+        }
+        // If overflow (wrapped to 0), continue to next word
+    }
+}
 
+__device__ void clearLowest8Bits(BigInt* num) {
+    // Clear the lowest 8 bits of the least significant word
+    num->data[0] &= 0xFFFFFF00;
+}
 
 __device__ __forceinline__ uint64_t mix(uint64_t x) {
     x ^= x >> 30;
@@ -1149,76 +1345,87 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         c++;
     }
 }
-
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " (required <min> <max> <target>) (optional <blocks> <threads>)" << std::endl;
+        std::cerr << "Usage: " << argv[0]
+                  << " <min> <max> <target> [blocks] [threads] [device_id]" << std::endl;
         return 1;
     }
-    
+
     try {
+        // Optional grid/thread/device config
+        int blocks  = (argc >= 5) ? std::stoi(argv[4]) : 32;
+        int threads = (argc >= 6) ? std::stoi(argv[5]) : 32;
+        int device_id = (argc >= 7) ? std::stoi(argv[6]) : 0;
+
+        // Check if device exists
+        int device_count = 0;
+        cudaGetDeviceCount(&device_count);
+        if (device_id < 0 || device_id >= device_count) {
+            std::cerr << "Invalid device ID: " << device_id
+                      << ". Available devices: 0 to " << (device_count - 1) << std::endl;
+            return 1;
+        }
+
+        // Set device
+        cudaSetDevice(device_id);
+
+        std::cout << "Using CUDA device " << device_id << std::endl;
+
         init_gpu_constants();
-        
+
         // Allocate device memory for 3 strings
         char *d_param1, *d_param2, *d_param3;
-        
-        // Get string lengths
+
         size_t len1 = strlen(argv[1]) + 1;
         size_t len2 = strlen(argv[2]) + 1;
         size_t len3 = strlen(argv[3]) + 1;
-        
-        // Allocate and copy in one operation each
+
         cudaMalloc(&d_param1, len1);
         cudaMemcpy(d_param1, argv[1], len1, cudaMemcpyHostToDevice);
-        
+
         cudaMalloc(&d_param2, len2);
         cudaMemcpy(d_param2, argv[2], len2, cudaMemcpyHostToDevice);
-        
+
         cudaMalloc(&d_param3, len3);
         cudaMemcpy(d_param3, argv[3], len3, cudaMemcpyHostToDevice);
-        
-        // Parse grid configuration
-        int blocks = (argc >= 5) ? std::stoi(argv[4]) : 32;
-        int threads = (argc >= 6) ? std::stoi(argv[5]) : 32;
-        
-        printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
-               blocks, threads, blocks * threads);
-        
+
+        std::cout << "Launching with " << blocks << " blocks and "
+                  << threads << " threads (Total: " << blocks * threads << " threads)" << std::endl;
+
         // Launch kernel
         start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
-        
-        // Wait for completion
+
+        // Wait for kernel to complete
         cudaDeviceSynchronize();
-        
-        // Check if solution was found
+
+        // Check for result
         int found_flag;
         cudaMemcpyFromSymbol(&found_flag, g_found, sizeof(int));
-        
+
         if (found_flag) {
             char found_hex[65];
             char found_hash160[41];
-            
-            // Copy results from device
+
             cudaMemcpyFromSymbol(found_hex, g_found_hex, 65);
             cudaMemcpyFromSymbol(found_hash160, g_found_hash160, 41);
-            
-            // Save to file with timestamp
+
             std::ofstream outfile("result.txt", std::ios::app);
             if (outfile.is_open()) {
                 std::time_t now = std::time(nullptr);
                 char timestamp[100];
-                std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", 
-                             std::localtime(&now));
-                
-                outfile << "[" << timestamp << "] Found: " << found_hex 
-                       << " -> " << found_hash160 << std::endl;
+                std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S",
+                              std::localtime(&now));
+
+                outfile << "[" << timestamp << "] Found: " << found_hex
+                        << " -> " << found_hash160 << std::endl;
                 outfile.close();
                 std::cout << "Result appended to result.txt" << std::endl;
             } else {
                 std::cerr << "Unable to open file for writing" << std::endl;
             }
         }
-        
+
         // Check for CUDA errors
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
@@ -1228,17 +1435,17 @@ int main(int argc, char* argv[]) {
             cudaFree(d_param3);
             return 1;
         }
-        
-        // Clean up
+
+        // Cleanup
         cudaFree(d_param1);
         cudaFree(d_param2);
         cudaFree(d_param3);
-        
+
     } catch (const std::exception& e) {
         std::cerr << "An error occurred: " << e.what() << std::endl;
         cudaDeviceReset();
         return 1;
     }
-    
+
     return 0;
 }
