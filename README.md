@@ -1,6 +1,6 @@
 # This Bitcoin Puzzle searcher Uses GPU with transformations
 
-![CUDA Function Flowchart](./cuda-function-flowchart.svg)
+<img src="https://raw.githubusercontent.com/puzzleman22/bitcoin_puzzle_transformation/refs/heads/main/cuda_function_flowchart.svg" />
 
 ## HOW TO USE:
 
