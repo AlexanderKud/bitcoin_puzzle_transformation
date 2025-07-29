@@ -71,7 +71,7 @@
   <!-- Main loop -->
   <rect x="450" y="530" width="300" height="60" rx="10" fill="url(#loopGrad)" filter="url(#shadow)"/>
   <text x="600" y="555" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="white">MAIN LOOP</text>
-  <text x="600" y="573" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">while (local_found == 0 && g_found == 0)</text>
+  <text x="600" y="573" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">while (local_found == 0 &amp;&amp; g_found == 0)</text>
   
   <!-- Generate random -->
   <rect x="450" y="620" width="300" height="60" rx="10" fill="url(#processGrad)" filter="url(#shadow)"/>
@@ -110,7 +110,7 @@
   <text x="400" y="960" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">3. EC Point Multiplication (Jacobian)</text>
   
   <rect x="620" y="930" width="360" height="50" rx="8" fill="url(#processGrad)" filter="url(#shadow)"/>
-  <text x="800" y="960" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">4. Convert to Affine & Compress</text>
+  <text x="800" y="960" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">4. Convert to Affine &amp; Compress</text>
   
   <rect x="420" y="990" width="360" height="50" rx="8" fill="url(#processGrad)" filter="url(#shadow)"/>
   <text x="600" y="1020" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">5. Calculate RIPEMD160 Hash</text>
@@ -127,7 +127,7 @@
   <rect x="750" y="1160" width="300" height="120" rx="10" fill="url(#foundGrad)" filter="url(#shadow)"/>
   <text x="900" y="1190" font-family="Arial, sans-serif" font-size="14" font-weight="bold" text-anchor="middle" fill="white">KEY FOUND!</text>
   <text x="900" y="1210" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">• Atomic set g_found = 1</text>
-  <text x="900" y="1228" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">• Store hex & hash160</text>
+  <text x="900" y="1228" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">• Store hex &amp; hash160</text>
   <text x="900" y="1246" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">• Print results</text>
   <text x="900" y="1264" font-family="Arial, sans-serif" font-size="12" text-anchor="middle" fill="white">• Break all loops</text>
   
@@ -181,13 +181,13 @@
   <text x="600" y="1650" font-family="Arial, sans-serif" font-size="16" font-weight="bold" text-anchor="middle" fill="#333">Key Features</text>
   
   <circle cx="100" cy="1690" r="8" fill="#4CAF50"/>
-  <text x="120" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Initialization & Start</text>
+  <text x="120" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Initialization &amp; Start</text>
   
   <circle cx="300" cy="1690" r="8" fill="#2196F3"/>
   <text x="320" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Processing Steps</text>
   
   <circle cx="500" cy="1690" r="8" fill="#FF9800"/>
-  <text x="520" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Loops & Iterations</text>
+  <text x="520" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Loops &amp; Iterations</text>
   
   <circle cx="700" cy="1690" r="8" fill="#9C27B0"/>
   <text x="720" y="1695" font-family="Arial, sans-serif" font-size="12" fill="#333">Conditions</text>
