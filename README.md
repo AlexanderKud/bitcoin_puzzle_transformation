@@ -1,6 +1,6 @@
 # This Bitcoin Puzzle searcher Uses GPU with transformations
 
-<img src="https://i.postimg.cc/G380GfD6/key-transformation-viz.png" />
+<img src="./cuda_function_flowchart.svg">
 
 ## HOW TO USE:
 
