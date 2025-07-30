@@ -1357,12 +1357,40 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     }
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int length = d_strlen(minRangePure) * 4;
-    // Move these outside the loop - they don't change
-    char minRange[65];
-    leftPad64(minRange, minRangePure);
-    char maxRange[65];
-    leftPad64(maxRange, maxRangePure);
+	int length = str_len(minRangePure);
+	
+	int hex_value = tid % 256;
+
+	// Make local copies to modify
+	char minRanger[65];
+	char maxRanger[65];
+
+	// Copy the input strings
+	int i = 0;
+	while (minRangePure[i] != '\0' && i < 64) {
+		minRanger[i] = minRangePure[i];
+		maxRanger[i] = maxRangePure[i];
+		i++;
+	}
+	minRanger[i] = '\0';
+	maxRanger[i] = '\0';
+
+	// Convert hex_value (0-255) to two hex digits
+	char first_digit = (hex_value >> 4) & 0xF;  // Upper 4 bits
+	char second_digit = hex_value & 0xF;         // Lower 4 bits
+
+	// Convert to hex characters
+	minRanger[1] = (first_digit < 10) ? ('0' + first_digit) : ('a' + first_digit - 10);
+	minRanger[2] = (second_digit < 10) ? ('0' + second_digit) : ('a' + second_digit - 10);
+
+	maxRanger[1] = (first_digit < 10) ? ('0' + first_digit) : ('a' + first_digit - 10);
+	maxRanger[2] = (second_digit < 10) ? ('0' + second_digit) : ('a' + second_digit - 10);
+
+
+	char minRange[65];
+    leftPad64(minRange, minRanger);
+	char maxRange[65];
+    leftPad64(maxRange, maxRanger);
     
     // Convert min/max to BigInt once outside the loop
     BigInt min, max;
@@ -1396,27 +1424,27 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
         bigint_to_binary(&random_value, binary);
         
-		for(int shuf = 0; shuf < 2; shuf++) {  // Add bit shuffle loop
-			// Optimization 2: Reduce redundant conversions
+		for(int shuf = 0; shuf < 2; shuf++) { 
+
 			for(int inv = 0; inv < 2; inv++) {
             
                 for(int z = 0; z < 2; z++) {
-                    for(int p = 0; p < 2; p++) {  // Add pair swap loop
-                        for(int il = 0; il < 2; il++) {  // Add interleave loop
+                    for(int p = 0; p < 2; p++) {
+                        for(int il = 0; il < 2; il++) {
                             for(int y = 0; y < length - 4; y++) {
                                 for(int x = 0; x < 16; x++) {
                                     
-                                    // Convert binary to BigInt directly - skip hex conversion
+                                    
                                     binary_to_bigint_direct(binary, &priv2);
                                     
-                                    // Inline scalar_mod_n to avoid function call overhead
+                                    
                                     if (compare_bigint(&priv2, &const_n) >= 0) {
                                         ptx_u256Sub(&priv, &priv2, &const_n);
                                     } else {
                                         copy_bigint(&priv, &priv2);
                                     }
                                     
-                                    // Keep the windowed method - it's better for your use case
+                                    
                                     scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
                                     jacobian_to_affine(&public_key, &result_jac);
                                     coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
@@ -1424,7 +1452,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                                     
                                     local_keys_checked++;
                                     
-                                    if(tid == 0)
+                                    if(tid == 0 && inv == 0 && shuf == 0 && z == 0 && p == 0 && il == 0 && y == 0 && x == 0)
                                     {
                                         hash160_to_hex(hash160_out, hash160_str);
                                         char hex_str[65];
