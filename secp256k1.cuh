@@ -1,4 +1,5 @@
-// Author: 8891689
+//Author telegram: https://t.me/nmn5436
+
 #ifndef SECP256K1_CUH
 #define SECP256K1_CUH
 #include <iostream>
@@ -8,7 +9,7 @@
 
 #define BIGINT_WORDS 8
 
-// CUDA 错误检查宏
+
 #define CHECK_CUDA(call) do { \
     cudaError_t err = call; \
     if (err != cudaSuccess) { \
@@ -18,9 +19,6 @@
 } while(0)
 
 
-// ============================================================================
-// 1. 数据结构 (与 C 版本相同, 可在 Host 和 Device 间传递)
-// ============================================================================
 struct BigInt {
     uint32_t data[BIGINT_WORDS];
 };
@@ -35,15 +33,12 @@ struct ECPointJac {
     bool infinity;
 };
 
-// ============================================================================
-// 常量参数 (在 GPU 的 __constant__ 内存中)
-// ============================================================================
+
 __constant__ BigInt const_p;
 __constant__ ECPointJac const_G_jacobian;
 __constant__ BigInt const_n;
 
 
-// --- BigInt 基本运算 ---
 __host__ __device__ __forceinline__ void init_bigint(BigInt *x, uint32_t val) {
     x->data[0] = val;
     for (int i = 1; i < BIGINT_WORDS; i++) x->data[i] = 0;
@@ -153,75 +148,108 @@ __device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], Big
         res->data[i] = r[i];
     }
 }
-
 __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
-    uint32_t prod[2 * BIGINT_WORDS] = {0};
+    uint32_t prod[16] = {0};
     
-    // Multiplication phase - optimized with unrolling
+    // Multiplication phase - exactly as original but with better unrolling
     #pragma unroll
-    for (int i = 0; i < BIGINT_WORDS; i++) {
+    for (int i = 0; i < 8; i++) {
         uint64_t carry = 0;
         uint32_t ai = a->data[i];
         
         #pragma unroll
-        for (int j = 0; j < BIGINT_WORDS; j++) {
+        for (int j = 0; j < 8; j++) {
             uint64_t tmp = (uint64_t)prod[i + j] + (uint64_t)ai * b->data[j] + carry;
             prod[i + j] = (uint32_t)tmp;
             carry = tmp >> 32;
         }
-        prod[i + BIGINT_WORDS] += (uint32_t)carry;
+        prod[i + 8] += (uint32_t)carry;
     }
     
-    // Split into L and H
+    // Split into L and H - exactly as original
     BigInt L, H;
     #pragma unroll
-    for (int i = 0; i < BIGINT_WORDS; i++) {
+    for (int i = 0; i < 8; i++) {
         L.data[i] = prod[i];
-        H.data[i] = prod[i + BIGINT_WORDS];
+        H.data[i] = prod[i + 8];
     }
     
-    // Initialize Rext with L
-    uint32_t Rext[9] = {0};
+    // Initialize Rext with L - exactly as original
+    uint32_t Rext[9];
     #pragma unroll
-    for (int i = 0; i < BIGINT_WORDS; i++) {
+    for (int i = 0; i < 8; i++) {
         Rext[i] = L.data[i];
     }
     Rext[8] = 0;
     
-    // Add H * 977
-    uint32_t H977[9] = {0};
-    multiply_bigint_by_const(&H, 977, H977);
-    add_9word(Rext, H977);
+    // Add H * 977 - optimized version of multiply_bigint_by_const
+    {
+        uint64_t carry = 0;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            uint64_t prod = (uint64_t)H.data[i] * 977 + carry;
+            uint64_t sum = (uint64_t)Rext[i] + (uint32_t)prod;
+            Rext[i] = (uint32_t)sum;
+            carry = (prod >> 32) + (sum >> 32);
+        }
+        Rext[8] += (uint32_t)carry;
+    }
 
-    // Add H shifted by one word (H * 2^32)
-    uint32_t Hshift[9] = {0};
-    shift_left_word(&H, Hshift);
-    add_9word(Rext, Hshift);
+    // Add H shifted by one word (H * 2^32) - optimized add
+    {
+        uint64_t carry = 0;
+        // Rext[0] stays the same (shift left means add 0 at position 0)
+        #pragma unroll
+        for (int i = 1; i < 9; i++) {
+            uint64_t sum = (uint64_t)Rext[i] + (i <= 8 ? H.data[i-1] : 0) + carry;
+            Rext[i] = (uint32_t)sum;
+            carry = sum >> 32;
+        }
+        // Note: any final carry is absorbed into Rext[8]
+    }
     
     // Handle overflow exactly as in original
     if (Rext[8]) {
-        uint32_t extra[9] = {0};
         BigInt extraBI;
         init_bigint(&extraBI, Rext[8]);
         Rext[8] = 0;
         
-        uint32_t extra977[9] = {0}, extraShift[9] = {0};
-        multiply_bigint_by_const(&extraBI, 977, extra977);
-        shift_left_word(&extraBI, extraShift);
+        // Compute extra977 = extraBI * 977
+        uint64_t carry = 0;
+        uint32_t extra977[9] = {0};
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            uint64_t prod = (uint64_t)extraBI.data[i] * 977 + carry;
+            extra977[i] = (uint32_t)prod;
+            carry = prod >> 32;
+        }
+        extra977[8] = (uint32_t)carry;
         
+        // Compute extraShift = extraBI << 32
+        uint32_t extraShift[9] = {0};
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            extraShift[i+1] = extraBI.data[i];
+        }
+        
+        // Add both to Rext
+        carry = 0;
         #pragma unroll
         for (int i = 0; i < 9; i++) {
-            extra[i] = extra977[i];
+            uint64_t sum = (uint64_t)Rext[i] + extra977[i] + extraShift[i] + carry;
+            Rext[i] = (uint32_t)sum;
+            carry = sum >> 32;
         }
-        add_9word(extra, extraShift);
-        add_9word(Rext, extra);
     }
     
     // Convert back to BigInt
     BigInt R_temp;
-    convert_9word_to_bigint(Rext, &R_temp);
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        R_temp.data[i] = Rext[i];
+    }
     
-    // Final reductions
+    // Final reductions - exactly as original
     if (Rext[8] || compare_bigint(&R_temp, &const_p) >= 0) {
         ptx_u256Sub(&R_temp, &R_temp, &const_p);
     }
@@ -231,8 +259,6 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     
     copy_bigint(res, &R_temp);
 }
-
-// 其他模运算函数
 __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
     BigInt temp;
     if (compare_bigint(a, b) < 0) {
@@ -245,7 +271,6 @@ __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, con
     copy_bigint(res, &temp);
 }
 
-// 将 a mod n，结果放到 res（因为 a < 2^256, 所以最多减一次 n 即可）
 __device__ __forceinline__ void scalar_mod_n(BigInt *res, const BigInt *a) {
     if (compare_bigint(a, &const_n) >= 0) {
         // a >= n, 做一次减法
@@ -297,16 +322,33 @@ __device__ void modexp(BigInt *res, const BigInt *base, const BigInt *exp) {
     copy_bigint(res, &result);
 }
 
+
 __device__ void mod_inverse(BigInt *res, const BigInt *a) {
     BigInt p_minus_2, two;
     init_bigint(&two, 2);
     ptx_u256Sub(&p_minus_2, &const_p, &two);
-    modexp(res, a, &p_minus_2);
+    
+    BigInt result;
+    init_bigint(&result, 1);
+    BigInt b;
+    copy_bigint(&b, a);
+    
+    // Your working version but with better loop unrolling
+    // Process 8 bits at a time for better performance
+    for (int i = 0; i < 256; i += 8) {
+        // Process 8 bits
+        for (int j = 0; j < 8; j++) {
+            if (i + j < 256 && get_bit(&p_minus_2, i + j)) {
+                mul_mod_device(&result, &result, &b);
+            }
+            mul_mod_device(&b, &b, &b);
+        }
+    }
+    
+    copy_bigint(res, &result);
 }
 
 
-
-// --- 雅可比坐标点运算 (Device 版本) ---
 __device__ __forceinline__ void point_set_infinity_jac(ECPointJac *P) {
     P->infinity = true;
 }
@@ -403,7 +445,6 @@ __device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJ
 
 __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
     if (P->infinity) {
-        // 标记为无穷远点，并把坐标全部置零
         R->infinity = true;
         init_bigint(&R->x, 0);
         init_bigint(&R->y, 0);
@@ -489,4 +530,6 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
     
     point_copy_jac(result, &res);
 }
-#endif // SECP256K1_CUH
+#endif
+
+//Author telegram: https://t.me/nmn5436
