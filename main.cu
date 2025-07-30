@@ -1424,7 +1424,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                                     
                                     local_keys_checked++;
                                     
-                                    if(tid == 1 && inv == 0 && z == 0 && p == 0 && il == 0 && y == 0 && x == 0)
+                                    if(tid == 0)
                                     {
                                         hash160_to_hex(hash160_out, hash160_str);
                                         char hex_str[65];
@@ -1454,13 +1454,12 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                                 }
                                 binary_rotate_left_by_one(binary);
                             }
-                            if (il == 0) {
-                                binary_interleave(binary);  // Apply interleave transformation
-                            }
+                                binary_interleave(binary); 
+
                         }
-                        if (p == 0) {
+
                             binary_pair_swap(binary);  // Apply pair swap transformation
-                        }
+                        
                     }
                     reverseBinaryAfterFirst1(binary);
                 }
@@ -1479,6 +1478,22 @@ int main(int argc, char* argv[]) {
     }
     
     try {
+		
+        int device_id = (argc >= 7) ? std::stoi(argv[6]) : 0;
+
+        // Check if device exists
+        int device_count = 0;
+        cudaGetDeviceCount(&device_count);
+        if (device_id < 0 || device_id >= device_count) {
+            std::cerr << "Invalid device ID: " << device_id
+                      << ". Available devices: 0 to " << (device_count - 1) << std::endl;
+            return 1;
+        }
+
+        // Set device
+        cudaSetDevice(device_id);
+
+        std::cout << "Using CUDA device " << device_id << std::endl;
         init_gpu_constants();
         
         // Allocate device memory for 3 strings
