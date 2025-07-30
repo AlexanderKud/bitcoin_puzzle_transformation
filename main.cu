@@ -1358,39 +1358,12 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
 	int length = str_len(minRangePure);
-	
-	int hex_value = tid % 256;
-
-	// Make local copies to modify
-	char minRanger[65];
-	char maxRanger[65];
-
-	// Copy the input strings
-	int i = 0;
-	while (minRangePure[i] != '\0' && i < 64) {
-		minRanger[i] = minRangePure[i];
-		maxRanger[i] = maxRangePure[i];
-		i++;
-	}
-	minRanger[i] = '\0';
-	maxRanger[i] = '\0';
-
-	// Convert hex_value (0-255) to two hex digits
-	char first_digit = (hex_value >> 4) & 0xF;  // Upper 4 bits
-	char second_digit = hex_value & 0xF;         // Lower 4 bits
-
-	// Convert to hex characters
-	minRanger[1] = (first_digit < 10) ? ('0' + first_digit) : ('a' + first_digit - 10);
-	minRanger[2] = (second_digit < 10) ? ('0' + second_digit) : ('a' + second_digit - 10);
-
-	maxRanger[1] = (first_digit < 10) ? ('0' + first_digit) : ('a' + first_digit - 10);
-	maxRanger[2] = (second_digit < 10) ? ('0' + second_digit) : ('a' + second_digit - 10);
 
 
 	char minRange[65];
-    leftPad64(minRange, minRanger);
+    leftPad64(minRange, minRangePure);
 	char maxRange[65];
-    leftPad64(maxRange, maxRanger);
+    leftPad64(maxRange, maxRangePure);
     
     // Convert min/max to BigInt once outside the loop
     BigInt min, max;
@@ -1424,7 +1397,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
         bigint_to_binary(&random_value, binary);
         
-		for(int shuf = 0; shuf < 2; shuf++) { 
+		for(int shuf = 0; shuf < 10; shuf++) { 
 
 			for(int inv = 0; inv < 2; inv++) {
             
