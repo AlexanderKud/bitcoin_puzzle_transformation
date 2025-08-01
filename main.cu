@@ -1400,7 +1400,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 			for(int inv = 0; inv < 2; inv++) {
                 for(int z = 0; z < 2; z++) {
                     for(int y = 0; y < length; y++) {
-                        for(int x = 0; x < 8; x++) {
+                        for(int x = 0; x < 16; x++) {
 
 							binary_to_bigint_direct(binary, &priv2);
 							
