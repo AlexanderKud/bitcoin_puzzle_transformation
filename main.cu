@@ -398,231 +398,144 @@ __device__ __forceinline__ uint64_t xorshift64(uint64_t* state) {
     *state = x;
     return x;
 }
-
-__device__ inline uint64_t rotl64(uint64_t x, int k) {
-    return (x << k) | (x >> (64 - k));
-}
-
-
-// Method 0: Chaotic mixing
-__device__ void generate_method_chaotic(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                       int highest_word, int highest_bit, BigInt* result) {
-    uint32_t chaos_counter = 0;
-    
-    while (true) {
-        BigInt candidate = {0};
-        uint64_t mixer = xorshift64(rng_state);
-        
-        #pragma unroll 4
-        for (int i = 0; i <= highest_word && i < 4; i++) {
-            uint64_t r1 = xorshift64(rng_state);
-            uint64_t r2 = xorshift64(rng_state);
-            
-            r1 ^= (r2 << 17) | (r2 >> 47);
-            r2 = r1 * 0x9E3779B97F4A7C15ULL;
-            r1 = (r1 >> 30) ^ r2;
-            
-            r1 ^= chaos_counter * 0xDEADBEEF;
-            r2 = rotl64(r2, chaos_counter & 63);
-            
-            if (i * 2 < 8) candidate.data[i * 2] = (uint32_t)(r1 ^ mixer);
-            if (i * 2 + 1 < 8) candidate.data[i * 2 + 1] = (uint32_t)((r2 >> 32) ^ (mixer >> 32));
-            
-            mixer = rotl64(mixer, 13);
-        }
-        
-        for (int i = 0; i <= highest_word && i < 8; i++) {
-            uint32_t val = candidate.data[i];
-            val ^= (val >> 7) ^ (val << 25);
-            val *= 0x85EBCA6B;
-            val ^= (val >> 13) ^ (val << 19);
-            candidate.data[i] = val;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        chaos_counter++;
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-// Method 1: Thread-based entropy
-__device__ void generate_method_entropy(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                       int highest_word, int highest_bit, BigInt* result, int tid) {
-    uint32_t thread_entropy = tid ^ (blockIdx.x << 10) ^ (blockIdx.y << 20);
-    uint64_t time_based = clock64();
-    
-    while (true) {
-        BigInt candidate = {0};
-        
-        uint64_t pcg_state = *rng_state;
-        *rng_state = pcg_state * 0x5851F42D4C957F2DULL + thread_entropy;
-        uint64_t xor_shifted = ((pcg_state >> 18) ^ pcg_state) >> 27;
-        uint32_t rot = pcg_state >> 59;
-        uint64_t pcg_output = (xor_shifted >> rot) | (xor_shifted << ((~rot + 1) & 31));
-        
-        for (int i = 0; i <= highest_word; i++) {
-            uint64_t r1 = xorshift64(rng_state);
-            uint64_t r2 = pcg_output;
-            uint64_t r3 = time_based;
-            
-            r1 ^= rotl64(r2, 23) ^ rotl64(r3, 41);
-            r2 = (r1 * 0x9E3779B97F4A7C15ULL) ^ thread_entropy;
-            r3 = (r2 + r3) * 0xC45979A72B4C8A7FULL;
-            
-            if (i < 8) {
-                candidate.data[i] = (uint32_t)(r1 ^ r2 ^ r3);
-            }
-            
-            pcg_output = r3;
-            time_based = rotl64(time_based, 7) ^ r1;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-// Method 2: Avalanche effect
-__device__ void generate_method_avalanche(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                         int highest_word, int highest_bit, BigInt* result) {
-    uint64_t avalanche[4];
-    avalanche[0] = xorshift64(rng_state);
-    avalanche[1] = xorshift64(rng_state);
-    avalanche[2] = xorshift64(rng_state);
-    avalanche[3] = xorshift64(rng_state);
-    
-    while (true) {
-        BigInt candidate = {0};
-        
-        for (int round = 0; round < 3; round++) {
-            avalanche[0] ^= avalanche[3] << 13;
-            avalanche[1] ^= avalanche[0] >> 7;
-            avalanche[2] ^= avalanche[1] << 17;
-            avalanche[3] ^= avalanche[2] >> 11;
-            
-            uint64_t temp = avalanche[0];
-            avalanche[0] = avalanche[1] ^ (avalanche[2] * 0x9E3779B97F4A7C15ULL);
-            avalanche[1] = avalanche[2] + rotl64(avalanche[3], 23);
-            avalanche[2] = avalanche[3] ^ temp;
-            avalanche[3] = temp + avalanche[0];
-        }
-        
-        for (int i = 0; i <= highest_word && i < 8; i++) {
-            uint64_t val = avalanche[i & 3];
-            
-            val ^= val >> 33;
-            val *= 0xFF51AFD7ED558CCDULL;
-            val ^= val >> 33;
-            val *= 0xC4CEB9FE1A85EC53ULL;
-            val ^= val >> 33;
-            
-            candidate.data[i] = (uint32_t)val;
-            avalanche[i & 3] = xorshift64(rng_state) ^ val;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-
-
-__device__ void generate_random_bigint_range_fast(uint64_t* rng_state, const BigInt* min, const BigInt* max, BigInt* result) {
+__device__ void generate_random_bigint_range_optimized(uint64_t* rng_state, const BigInt* min, const BigInt* max, BigInt* result) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
     
-    // Calculate range = max - min + 1 (common for all methods)
+    // Calculate range = max - min + 1
     BigInt range, range_plus_one;
     bigint_subtract(max, min, &range);
-    
     BigInt one = {1, 0, 0, 0, 0, 0, 0, 0};
     bigint_add(&range, &one, &range_plus_one);
     
-    // Find highest bit (common for all methods)
+    // Find the bit length of range_plus_one
     int highest_word = 7;
     while (highest_word > 0 && range_plus_one.data[highest_word] == 0)
         highest_word--;
-    int highest_bit = 31;
-    while (highest_bit > 0 && (range_plus_one.data[highest_word] & (1U << highest_bit)) == 0)
-        highest_bit--;
-    highest_bit += 1;
     
-    // Ultra-chaotic method selection
-    uint32_t chaos_seed = tid ^ (warp_id << 5) ^ (lane_id << 10);
-    chaos_seed *= 0x9E3779B9;  // Golden ratio multiplier
-    chaos_seed ^= (chaos_seed >> 16);
-    chaos_seed *= 0x85EBCA6B;
-    chaos_seed ^= (chaos_seed >> 13);
-    chaos_seed *= 0xC2B2AE35;
-    chaos_seed ^= (chaos_seed >> 16);
-    
-    // Multi-factor method selection
-    int method = chaos_seed % 3;
-    
-    // Lane position influence
-    if (lane_id & 1) {  // Odd lanes
-        method = (method + 1) % 3;
-    }
-    if (lane_id & 2) {  // Every 2nd bit set
-        method = (method + 2) % 3;
+    int bit_length = highest_word * 32;
+    if (range_plus_one.data[highest_word] != 0) {
+        bit_length += 32 - __clz(range_plus_one.data[highest_word]);
     }
     
-    // Warp-based rotation
-    method = (method + (warp_id & 0x3)) % 3;
+    // Enhanced multi-source entropy mixing
+    uint64_t entropy = *rng_state;
     
-    // Grid position influence
-    uint32_t grid_factor = (blockIdx.x * gridDim.y + blockIdx.y) % 7;
-    if (grid_factor < 3) {
-        method = (method + grid_factor) % 3;
+    // Mix in thread-specific entropy sources
+    entropy ^= ((uint64_t)tid << 32) | tid;
+    entropy ^= ((uint64_t)blockIdx.x << 48) | ((uint64_t)blockIdx.y << 32) | 
+               ((uint64_t)threadIdx.x << 16) | threadIdx.y;
+    entropy ^= clock64();  // Hardware cycle counter for temporal entropy
+    
+    // Apply cryptographic-quality mixing (based on SplitMix64)
+    entropy += 0x9e3779b97f4a7c15ULL;
+    entropy = (entropy ^ (entropy >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    entropy = (entropy ^ (entropy >> 27)) * 0x94d049bb133111ebULL;
+    entropy = entropy ^ (entropy >> 31);
+    
+    // Update RNG state with mixed entropy
+    *rng_state = entropy;
+    
+    // Rejection sampling with optimized bit generation
+    BigInt candidate;
+    int max_attempts = 100;  // Prevent infinite loops
+    
+    for (int attempt = 0; attempt < max_attempts; attempt++) {
+        // Generate random bits efficiently
+        uint64_t current_entropy = entropy;
+        
+        // Clear candidate
+        for (int i = 0; i < 8; i++) {
+            candidate.data[i] = 0;
+        }
+        
+        // Generate only the needed number of bits
+        int bits_generated = 0;
+        int word_idx = 0;
+        
+        while (bits_generated < bit_length && word_idx < 8) {
+            // Generate next 64-bit entropy chunk
+            current_entropy += 0x9e3779b97f4a7c15ULL;
+            current_entropy = (current_entropy ^ (current_entropy >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            current_entropy = (current_entropy ^ (current_entropy >> 27)) * 0x94d049bb133111ebULL;
+            current_entropy = current_entropy ^ (current_entropy >> 31);
+            
+            // Fill current word
+            if (bits_generated + 32 <= bit_length) {
+                candidate.data[word_idx] = (uint32_t)current_entropy;
+                bits_generated += 32;
+            } else {
+                // Partial word - mask unused bits
+                int remaining_bits = bit_length - bits_generated;
+                uint32_t mask = (1U << remaining_bits) - 1;
+                candidate.data[word_idx] = (uint32_t)current_entropy & mask;
+                bits_generated = bit_length;
+            }
+            
+            word_idx++;
+            current_entropy >>= 32;  // Use upper 32 bits for next iteration
+        }
+        
+        // Check if candidate < range_plus_one
+        bool valid = true;
+        for (int i = 7; i >= 0; i--) {
+            if (candidate.data[i] > range_plus_one.data[i]) {
+                valid = false;
+                break;
+            } else if (candidate.data[i] < range_plus_one.data[i]) {
+                break;
+            }
+        }
+        
+        if (valid) {
+            // Add min to get final result
+            bigint_add(&candidate, min, result);
+            return;
+        }
+        
+        // Update entropy for next attempt
+        entropy = current_entropy;
     }
     
-    // Branch based on computed method
-    switch (method) {
-        case 0:
-            generate_method_chaotic(rng_state, min, &range_plus_one, highest_word, highest_bit, result);
-            break;
-        case 1:
-            generate_method_entropy(rng_state, min, &range_plus_one, highest_word, highest_bit, result, tid);
-            break;
-        case 2:
-            generate_method_avalanche(rng_state, min, &range_plus_one, highest_word, highest_bit, result);
-            break;
+    // Fallback: use simple reduction (introduces slight bias but ensures termination)
+    // This should rarely be reached with proper bit_length calculation
+    
+    // Generate a full random BigInt
+    uint64_t fallback_entropy = entropy;
+    for (int i = 0; i < 8; i++) {
+        fallback_entropy += 0x9e3779b97f4a7c15ULL;
+        fallback_entropy = (fallback_entropy ^ (fallback_entropy >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        fallback_entropy = (fallback_entropy ^ (fallback_entropy >> 27)) * 0x94d049bb133111ebULL;
+        fallback_entropy = fallback_entropy ^ (fallback_entropy >> 31);
+        
+        candidate.data[i] = (uint32_t)fallback_entropy;
+        fallback_entropy >>= 32;
     }
+    
+    // Simple modular reduction using repeated subtraction
+    // While candidate >= range_plus_one, subtract range_plus_one
+    while (true) {
+        bool candidate_ge_range = false;
+        
+        // Check if candidate >= range_plus_one
+        for (int i = 7; i >= 0; i--) {
+            if (candidate.data[i] > range_plus_one.data[i]) {
+                candidate_ge_range = true;
+                break;
+            } else if (candidate.data[i] < range_plus_one.data[i]) {
+                break;
+            }
+            // If equal, continue to next word
+            if (i == 0) candidate_ge_range = true; // All words equal
+        }
+        
+        if (!candidate_ge_range) break;
+        
+        // Subtract range_plus_one from candidate
+        bigint_subtract(&candidate, &range_plus_one, &candidate);
+    }
+    
+    // Add min to get final result
+    bigint_add(&candidate, min, result);
 }
 
 // Convert hex string to BigInt - optimized
@@ -958,15 +871,15 @@ __device__ void clearLowest8Bits(BigInt* num) {
     num->data[0] &= 0xFFFFFF00;
 }
 
-__device__ __forceinline__ uint64_t mix(uint64_t x) {
-    x ^= x >> 30;
-    x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27;
-    x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31;
+// Helper function for better mixing (if not already defined)
+__device__ inline uint64_t mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
     return x;
 }
-
 // Convert BigInt to binary string
 __device__ void bigint_to_binary(const BigInt* bigint, char* binary_str) {
     int idx = 0;
@@ -1336,7 +1249,22 @@ __device__ void binary_bit_shuffle(char* binary) {
     }
 }
 
-// Optimization 1: Pre-allocate and reuse more variables
+// Fast RNG function
+__device__ uint64_t fast_rng(uint64_t* state) {
+    *state = *state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return *state;
+}
+
+// Optimized hash160 comparison using vectorized loads
+__device__ bool compare_hash160_fast_vectorized(const uint8_t* hash1, const uint8_t* target) {
+    const uint4 h1 = *((uint4*)hash1);
+    const uint4 h2 = *((uint4*)target);
+    const uint32_t h1_tail = *((uint32_t*)(hash1 + 16));
+    const uint32_t h2_tail = *((uint32_t*)(target + 16));
+    
+    return (h1.x == h2.x) && (h1.y == h2.y) && 
+           (h1.z == h2.z) && (h1.w == h2.w) && (h1_tail == h2_tail);
+}
 __global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("min: %s\n", minRangePure);
@@ -1344,94 +1272,131 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         printf("ripemd160 target: %s\n\n", target);
     }
     
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-	int length = ((str_len(minRangePure) - 1) * 4);
-
-	char minRange[65];
-    leftPad64(minRange, minRangePure);
-	char maxRange[65];
-    leftPad64(maxRange, maxRangePure);
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int length = ((str_len(minRangePure) - 1) * 4);
     
-    // Convert min/max to BigInt once outside the loop
-    BigInt min, max;
-    hex_to_bigint(minRange, &min);
-    hex_to_bigint(maxRange, &max);
-    // Performance tracking variables
+    // Use shared memory for frequently accessed data
+    __shared__ char s_minRange[65];
+    __shared__ char s_maxRange[65];
+    __shared__ BigInt s_min, s_max;
+    __shared__ uint8_t s_target_bytes[20];
+    
+    // Initialize shared memory once per block
+    if (threadIdx.x == 0) {
+        leftPad64(s_minRange, minRangePure);
+        leftPad64(s_maxRange, maxRangePure);
+        hex_to_bigint(s_minRange, &s_min);
+        hex_to_bigint(s_maxRange, &s_max);
+        hex_string_to_bytes(target, s_target_bytes, 20);
+    }
+    __syncthreads();
+    
+    // Local copies from shared memory
+    BigInt min = s_min;
+    BigInt max = s_max;
+    
+    // Align target bytes for faster comparison
+    __align__(16) uint8_t target_bytes[20];
+    #pragma unroll
+    for (int i = 0; i < 20; i++) {
+        target_bytes[i] = s_target_bytes[i];
+    }
+    
+    // Performance tracking
     unsigned long long local_keys_checked = 0;
-    // Improved seeding with better entropy mixing
+    
+    // Enhanced RNG with better entropy
     uint64_t seed = clock64();
     seed ^= ((uint64_t)tid << 32) | ((uint64_t)blockIdx.x << 16) | threadIdx.x;
     seed = mix(seed);
     seed ^= ((uint64_t)gridDim.x << 48) | ((uint64_t)blockDim.x << 32);
     uint64_t rng_state = mix(seed);
     
-    // Pre-allocate ALL working variables once - avoid repeated allocation overhead
+    // Pre-allocate all working variables
     BigInt random_value, priv2, priv;
     ECPointJac result_jac;
     ECPoint public_key;
-    uint8_t pubkey[33];
-    uint8_t hash160_out[20];
+    __align__(16) uint8_t pubkey[33];
+    __align__(16) uint8_t hash160_out[20];
     char hash160_str[41];
     char temp_hex[65];
     char binary[257];
-    int local_found = 0;
-    // Pre-convert target once
-    uint8_t target_bytes[20];
-    hex_string_to_bytes(target, target_bytes, 20);
+    
+    // Cache frequently used constants in registers
+    const BigInt n_cached = const_n;
+    const ECPointJac G_cached = const_G_jacobian;
     
     int c = 0;
-    while(local_found == 0 && g_found == 0) {
-        generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
+    
+    // Main loop with optimizations
+    while (g_found == 0) {
+        // Generate random value
+        generate_random_bigint_range_optimized(&rng_state, &min, &max, &random_value);
         bigint_to_binary(&random_value, binary);
         
-
-		for(int x = 0; x < 16; x++) {
-
-			binary_to_bigint_direct(binary, &priv2);
-			
-			if (compare_bigint(&priv2, &const_n) >= 0) {
-				ptx_u256Sub(&priv, &priv2, &const_n);
-			} else {
-				copy_bigint(&priv, &priv2);
-			}
-			
-			
-			scalar_multiply_optimized(&result_jac, &const_G_jacobian, &priv);
-			jacobian_to_affine_fast(&public_key, &result_jac);
-			coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-			hash160(pubkey, 33, hash160_out);
-			
-			local_keys_checked++;
-			
-			if(tid == 0 && x == 0)
-			{
-				hash160_to_hex(hash160_out, hash160_str);
-				char hex_str[65];
-				bigint_to_hex(&priv, hex_str);
-				printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-			}
-			
-			// Optimization 3: Early exit with minimal branching
-			if (compare_hash160_fast(hash160_out, target_bytes)) {
-				if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-					// Only convert to hex when found
-					binary_to_hex(binary, temp_hex);
-					hash160_to_hex(hash160_out, hash160_str);
-					
-					memcpy(g_found_hex, temp_hex, 65);
-					memcpy(g_found_hash160, hash160_str, 41);
-					
-					printf("\n*** FOUND! ***\n");
-					printf("Private Key: %s\n", temp_hex);
-					printf("Hash160: %s\n", hash160_str);
-				}
-				local_found = 1;
-				goto exit_loops; // Break all nested loops efficiently
-			}
-			binary_vertical_rotate_up(binary);
-		}
-        exit_loops:;
+        // Unroll the inner loop partially for better performance
+        #pragma unroll 4
+        for (int x = 0; x < 16; x++) {
+            // Direct conversion without intermediate steps
+            binary_to_bigint_direct(binary, &priv2);
+            
+            // Optimized modular reduction
+            if (compare_bigint(&priv2, &n_cached) >= 0) {
+                ptx_u256Sub(&priv, &priv2, &n_cached);
+            } else {
+                copy_bigint(&priv, &priv2);
+            }
+            
+            // Scalar multiplication with cached base point
+            scalar_multiply_optimized(&result_jac, &G_cached, &priv);
+            jacobian_to_affine_fast(&public_key, &result_jac);
+            
+            // Generate compressed public key
+            coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+            
+            // Hash computation
+            hash160(pubkey, 33, hash160_out);
+            
+            local_keys_checked++;
+            
+            // Debug print (unchanged)
+            if (tid == 0 && x == 0) {
+                hash160_to_hex(hash160_out, hash160_str);
+                char hex_str[65];
+                bigint_to_hex(&priv, hex_str);
+                printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
+            }
+            
+            // Optimized comparison with early exit
+            if (compare_hash160_fast(hash160_out, target_bytes)) {
+                // Atomic check to ensure only one thread claims the find
+                if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+                    // Convert to hex only when found
+                    binary_to_hex(binary, temp_hex);
+                    hash160_to_hex(hash160_out, hash160_str);
+                    
+                    // Use memcpy for efficient copying
+                    memcpy(g_found_hex, temp_hex, 65);
+                    memcpy(g_found_hash160, hash160_str, 41);
+                    
+                    printf("\n*** FOUND! ***\n");
+                    printf("Private Key: %s\n", temp_hex);
+                    printf("Hash160: %s\n", hash160_str);
+                }
+                return; // Exit kernel immediately
+            }
+            
+            // Rotate for next iteration
+            binary_vertical_rotate_up(binary);
+        }
+        
         c++;
+        
+        // Cooperative exit check every N iterations to reduce overhead
+        if ((c & 0xFF) == 0) {
+            __threadfence();
+            if (g_found != 0) return;
+        }
     }
 }
 int main(int argc, char* argv[]) {

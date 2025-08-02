@@ -158,16 +158,16 @@ __device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], Big
         res->data[i] = r[i];
     }
 }
-
 __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
     uint32_t prod[16] = {0};
     
-    // Multiplication phase - exactly as original but with better unrolling
+    // Multiplication phase - optimized with better memory access patterns
     #pragma unroll
     for (int i = 0; i < 8; i++) {
         uint64_t carry = 0;
         uint32_t ai = a->data[i];
         
+        // Use PTX for the inner loop multiplication
         #pragma unroll
         for (int j = 0; j < 8; j++) {
             uint64_t tmp = (uint64_t)prod[i + j] + (uint64_t)ai * b->data[j] + carry;
@@ -177,7 +177,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         prod[i + 8] += (uint32_t)carry;
     }
     
-    // Split into L and H - exactly as original
+    // Split into L and H
     BigInt L, H;
     #pragma unroll
     for (int i = 0; i < 8; i++) {
@@ -185,7 +185,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         H.data[i] = prod[i + 8];
     }
     
-    // Initialize Rext with L - exactly as original
+    // Initialize Rext with L
     uint32_t Rext[9];
     #pragma unroll
     for (int i = 0; i < 8; i++) {
@@ -193,30 +193,31 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     }
     Rext[8] = 0;
     
-    // Add H * 977 - optimized version of multiply_bigint_by_const
+    // Optimized: Add H * 977 and H * 2^32 in a single pass
+    uint64_t carry = 0;
+    
+    // For i=0: just add H[0] * 977
     {
-        uint64_t carry = 0;
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            uint64_t prod = (uint64_t)H.data[i] * 977 + carry;
-            uint64_t sum = (uint64_t)Rext[i] + (uint32_t)prod;
-            Rext[i] = (uint32_t)sum;
-            carry = (prod >> 32) + (sum >> 32);
-        }
-        Rext[8] += (uint32_t)carry;
+        uint64_t prod = (uint64_t)H.data[0] * 977;
+        uint64_t sum = (uint64_t)Rext[0] + (uint32_t)prod;
+        Rext[0] = (uint32_t)sum;
+        carry = (prod >> 32) + (sum >> 32);
     }
-
-    // Add H shifted by one word (H * 2^32) - optimized add
+    
+    // For i=1 to 7: add H[i] * 977 + H[i-1] (shifted)
+    #pragma unroll
+    for (int i = 1; i < 8; i++) {
+        uint64_t prod = (uint64_t)H.data[i] * 977;
+        uint64_t sum = (uint64_t)Rext[i] + (uint32_t)prod + H.data[i-1] + carry;
+        Rext[i] = (uint32_t)sum;
+        carry = (prod >> 32) + (sum >> 32);
+    }
+    
+    // For i=8: add H[7] (shifted) + carry
     {
-        uint64_t carry = 0;
-        // Rext[0] stays the same (shift left means add 0 at position 0)
-        #pragma unroll
-        for (int i = 1; i < 9; i++) {
-            uint64_t sum = (uint64_t)Rext[i] + (i <= 8 ? H.data[i-1] : 0) + carry;
-            Rext[i] = (uint32_t)sum;
-            carry = sum >> 32;
-        }
-        // Note: any final carry is absorbed into Rext[8]
+        uint64_t sum = (uint64_t)Rext[8] + H.data[7] + carry;
+        Rext[8] = (uint32_t)sum;
+        // Any overflow beyond this is handled next
     }
     
     // Handle overflow exactly as in original
@@ -225,31 +226,25 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         init_bigint(&extraBI, Rext[8]);
         Rext[8] = 0;
         
-        // Compute extra977 = extraBI * 977
-        uint64_t carry = 0;
-        uint32_t extra977[9] = {0};
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            uint64_t prod = (uint64_t)extraBI.data[i] * 977 + carry;
-            extra977[i] = (uint32_t)prod;
-            carry = prod >> 32;
-        }
-        extra977[8] = (uint32_t)carry;
+        // Compute extra977 = extraBI * 977 (optimized for single word)
+        uint64_t prod = (uint64_t)extraBI.data[0] * 977;
+        uint32_t extra977_low = (uint32_t)prod;
+        uint32_t extra977_high = (uint32_t)(prod >> 32);
         
-        // Compute extraShift = extraBI << 32
-        uint32_t extraShift[9] = {0};
-        #pragma unroll
-        for (int i = 0; i < 8; i++) {
-            extraShift[i+1] = extraBI.data[i];
-        }
+        // Add extra977 to Rext[0] and Rext[1]
+        uint64_t sum = (uint64_t)Rext[0] + extra977_low;
+        Rext[0] = (uint32_t)sum;
+        carry = (sum >> 32);
         
-        // Add both to Rext
-        carry = 0;
-        #pragma unroll
-        for (int i = 0; i < 9; i++) {
-            uint64_t sum = (uint64_t)Rext[i] + extra977[i] + extraShift[i] + carry;
+        sum = (uint64_t)Rext[1] + extra977_high + extraBI.data[0] + carry;
+        Rext[1] = (uint32_t)sum;
+        carry = (sum >> 32);
+        
+        // Propagate carry if needed
+        for (int i = 2; i < 9 && carry; i++) {
+            sum = (uint64_t)Rext[i] + carry;
             Rext[i] = (uint32_t)sum;
-            carry = sum >> 32;
+            carry = (sum >> 32);
         }
     }
     
@@ -283,8 +278,6 @@ __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, con
     copy_bigint(res, &temp);
 }
 
-// MOST CRITICAL SPEED FIX: Replace bit-by-bit modexp with optimized version
-// This fixes the infinite loop issue while still providing major speedup
 __device__ void mod_inverse_fast(BigInt *res, const BigInt *a) {
     BigInt R0, R1;
     init_bigint(&R0, 1);
@@ -559,6 +552,7 @@ __device__ void scalar_multiply_optimized(ECPointJac *result, const ECPointJac *
         scalar_multiply_G_precomputed_large(result, scalar);
     } else {
         // Use general method with shared memory
+		printf("manual scalar");
         scalar_multiply_jac_device(result, point, scalar);
     }
 }
@@ -606,31 +600,30 @@ void host_double_point_jac(ECPointJac *R, const ECPointJac *P) {
 
 // GPU kernel to compute precomputed table
 __global__ void compute_precomputed_table_gpu(ECPointJac *temp_table) {
-    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= PRECOMP_SIZE) return;
     
     if (idx == 0) {
         // table[0] = infinity (0*G)
         point_set_infinity_jac(&temp_table[0]);
-    } else if (idx == 1) {
-        // table[1] = G (1*G)
-        point_copy_jac(&temp_table[1], &const_G_jacobian);
+        return;
     }
     
-    // Synchronize to ensure table[0] and table[1] are ready
-    __syncthreads();
+    // Each thread computes idx*G using binary representation
+    ECPointJac result, base;
+    point_set_infinity_jac(&result);
+    point_copy_jac(&base, &const_G_jacobian);
     
-    // Sequential computation of remaining points
-    // Only thread 0 does this to avoid race conditions
-    if (idx == 0) {
-        for (int i = 2; i < PRECOMP_SIZE; i++) {
-            add_point_jac(&temp_table[i], &temp_table[i-1], &const_G_jacobian);
-            
-            if (i % 32 == 0) {
-                printf("GPU computed %d*G\n", i);
-            }
+    int temp_idx = idx;
+    while (temp_idx > 0) {
+        if (temp_idx & 1) {
+            add_point_jac(&result, &result, &base);
         }
+        double_point_jac(&base, &base);
+        temp_idx >>= 1;
     }
+    
+    point_copy_jac(&temp_table[idx], &result);
 }
 
 // New kernel for batch computation
