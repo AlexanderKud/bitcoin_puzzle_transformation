@@ -1278,7 +1278,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
-    
+    int length = str_len(minRangePure) - 1;
     // Move these outside the loop - they don't change
     char minRange[65];
     leftPad64(minRange, minRangePure);
@@ -1340,80 +1340,85 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         for(int inv = 0; inv < 2; inv++) {
             #pragma unroll 2
             for(int z = 0; z < 2; z++) {
-                // Process 16 variations
-                #pragma unroll 4
-                for(int x = 0; x < 16; x++) {
-                    // Convert hex to bigint
-                    hex_to_bigint(hex, &priv2);
-                    
-                    // Use direct assignment instead of copy_bigint if possible
-                    priv = priv2;
-                    
-					// Scalar multiplication with cached base point
-					scalar_multiply_optimized(&result_jac, &G_cached, &priv);
-					jacobian_to_affine_fast(&public_key, &result_jac);
-					
-					// Generate compressed public key
-					coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-					
-                    
-                    // Compute hash160
-                    hash160(pubkey, 33, hash160_out);
-                    
-                    // Increment local counter
-                    local_keys_checked++;
-                    
-                    // Performance reporting - only one thread reports
-                    if (tid == 0 && (local_keys_checked - last_report_keys) >= 10000) {
-                        clock_t current_time = clock64();
-                        double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0; // clock64 is in nanoseconds
-                        
-                        if (elapsed_seconds >= 1.0) { // Report every second
-                            // Update global counter
-                            unsigned long long keys_this_period = local_keys_checked - last_report_keys;
-                            atomicAdd((unsigned long long*)&g_total_keys, keys_this_period * total_threads);
-                            
-                            // Calculate and display speed
-                            double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
-                            double total_elapsed = (double)(current_time - start_time) / 1000000000.0;
-                            unsigned long long total_keys = g_total_keys;
-                            
-                            printf("[%.1f s] Speed: %.2f MKey/s | Total keys: %.2f billion | Current: %s\n", 
-                                   total_elapsed,
-                                   keys_per_second / 1000000.0,
-                                   total_keys / 1000000000.0,
-                                   hex);
-                            
-                            last_report_keys = local_keys_checked;
-                            last_report_time = current_time;
-                        }
-                    }
-                    
-                    // Check if we found the target - use optimized comparison
-                    if (compare_hash160(hash160_out, target_bytes)) {
-                        // Try to claim the found flag atomically
-                        if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-                            // Convert hash160 to string
-                            hash160_to_hex(hash160_out, hash160_str);
-                            
-                            // Copy results to global memory
-                            int hex_len = d_strlen(hex);
-                            // Use single memcpy for efficiency
-                            memcpy(g_found_hex, hex, hex_len + 1);
-                            memcpy(g_found_hash160, hash160_str, 41);
-                            
-                            printf("\n*** FOUND! ***\n");
-                            printf("Private Key: %s\n", hex);
-                            printf("Hash160: %s\n", hash160_str);
-                            printf("Total keys checked: %.2f billion\n", g_total_keys / 1000000000.0);
-                        }
-                        local_found = 1;
-                        break;
-                    }
-                    
-                    // Rotate hex for next iteration
-                    hex_vertical_rotate_up(hex);
-                }
+				
+				for(int y = 0; y < length; y++)
+				{
+					// Process 16 variations
+					#pragma unroll 4
+					for(int x = 0; x < 16; x++) {
+						// Convert hex to bigint
+						hex_to_bigint(hex, &priv2);
+						
+						// Use direct assignment instead of copy_bigint if possible
+						priv = priv2;
+						
+						// Scalar multiplication with cached base point
+						scalar_multiply_optimized(&result_jac, &G_cached, &priv);
+						jacobian_to_affine_fast(&public_key, &result_jac);
+						
+						// Generate compressed public key
+						coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+						
+						
+						// Compute hash160
+						hash160(pubkey, 33, hash160_out);
+						
+						// Increment local counter
+						local_keys_checked++;
+						
+						// Performance reporting - only one thread reports
+						if (tid == 0 && (local_keys_checked - last_report_keys) >= 10000) {
+							clock_t current_time = clock64();
+							double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0; // clock64 is in nanoseconds
+							
+							if (elapsed_seconds >= 1.0) { // Report every second
+								// Update global counter
+								unsigned long long keys_this_period = local_keys_checked - last_report_keys;
+								atomicAdd((unsigned long long*)&g_total_keys, keys_this_period * total_threads);
+								
+								// Calculate and display speed
+								double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
+								double total_elapsed = (double)(current_time - start_time) / 1000000000.0;
+								unsigned long long total_keys = g_total_keys;
+								
+								printf("[%.1f s] Speed: %.2f MKey/s | Total keys: %.2f billion | Current: %s\n", 
+									   total_elapsed,
+									   keys_per_second / 1000000.0,
+									   total_keys / 1000000000.0,
+									   hex);
+								
+								last_report_keys = local_keys_checked;
+								last_report_time = current_time;
+							}
+						}
+						
+						// Check if we found the target - use optimized comparison
+						if (compare_hash160(hash160_out, target_bytes)) {
+							// Try to claim the found flag atomically
+							if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+								// Convert hash160 to string
+								hash160_to_hex(hash160_out, hash160_str);
+								
+								// Copy results to global memory
+								int hex_len = d_strlen(hex);
+								// Use single memcpy for efficiency
+								memcpy(g_found_hex, hex, hex_len + 1);
+								memcpy(g_found_hash160, hash160_str, 41);
+								
+								printf("\n*** FOUND! ***\n");
+								printf("Private Key: %s\n", hex);
+								printf("Hash160: %s\n", hash160_str);
+								printf("Total keys checked: %.2f billion\n", g_total_keys / 1000000000.0);
+							}
+							local_found = 1;
+							break;
+						}
+						
+						// Rotate hex for next iteration
+						hex_vertical_rotate_up(hex);
+					}
+					hex_rotate_right_by_one(hex);
+				}
                 if (local_found) break;
                 reverseAfterFirst1(hex);
             }
