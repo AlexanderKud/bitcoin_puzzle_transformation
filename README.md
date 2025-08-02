@@ -9,7 +9,7 @@ This project is a **GPU-accelerated Bitcoin puzzle solver** using CUDA and a uni
 ### Syntax
 
 ```
-main.exe <start_range> <end_range> <target_hash160> <blocks> <threads>
+main.exe <start_range> <end_range> <target_hash160> <blocks> <threads> <device id>
 ```
 
 ### Examples
