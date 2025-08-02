@@ -1299,7 +1299,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
-    int length = str_len(minRangePure) - 1;
+    int length = (str_len(minRangePure) - 1) * 4;
     
     // Pre-allocate all working variables in registers
     char minRange[65], maxRange[65];
@@ -1341,15 +1341,9 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     while (shared_found == 0 && g_found == 0) {
         // Generate random value with triple RNG mixing
         generate_random_bigint_range_optimized(&rng_state, &min, &max, &random_value);
+		char binary[257]; // 256 bits + null terminator
+		bigint_to_binary(&random_value, binary);
         
-        // Mix RNG states periodically for better entropy
-        if ((c & 0x3F) == 0) {  // Every 64 iterations
-            uint64_t temp = xorshift64(&rng_state2);
-            rng_state ^= temp;
-            rng_state3 = mix(rng_state3 ^ temp);
-        }
-        
-        bigint_to_hex(&random_value, hex);
         
         // Process variations with aggressive unrolling
         #pragma unroll 2
@@ -1368,7 +1362,9 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                     #pragma unroll 16
                     for (int x = 0; x < 16; x++) {
                         // Direct hex to bigint conversion
-                        hex_to_bigint(hex, &priv);
+						char temp_hex[65];
+						binary_to_hex(binary, temp_hex);
+						hex_to_bigint(temp_hex, &priv);
                         
                         // Optimized scalar multiplication
                         scalar_multiply_optimized(&result_jac, &G_cached, &priv);
@@ -1387,6 +1383,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                             // Try to claim the found flag
                             if (atomicCAS((int*)&g_found, 0, 1) == 0) {
                                 // Convert results
+								binary_to_hex(binary, hex);
                                 char hash160_str[41];
                                 hash160_to_hex(hash160_out, hash160_str);
                                 
@@ -1405,19 +1402,19 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                         }
                         
                         // Rotate hex for next iteration
-                        hex_vertical_rotate_up(hex);
+                        binary_vertical_rotate_up(binary);
                     }
                     
                     // Move to next position
-                    hex_rotate_right_by_one(hex);
+                    binary_rotate_left_by_one(binary);
                 }
                 
                 // Apply transformation
-                reverseAfterFirst1(hex);
+                reverseBinaryAfterFirst1(binary);
             }
             
             // Apply inversion
-            invertHexAfterFirst1(hex);
+            invertBinaryAfterFirst1(binary);
         }
         
         c++;
@@ -1434,10 +1431,9 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                 double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
                 unsigned long long total_keys = g_total_keys;
                 
-                printf("Speed: %.2f MKey/s | Total: %.2f billion | Block %d\n", 
+                printf("Speed: %.2f MKey/s | Total: %.2f billion\n", 
                        keys_per_second / 1000000.0,
-                       total_keys / 1000000000.0,
-                       blockIdx.x);
+                       total_keys / 1000000000.0);
                 
                 last_report_keys = local_keys_checked;
                 last_report_time = current_time;
