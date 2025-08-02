@@ -24,6 +24,8 @@ you set the amount of blocks and threads like this:
 ###  32 blocks x 32 threads = 1024 threads
 `main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32`
 
+the current output print is done only in one thread, the others work silently, so no need to worry about speed slow downs
+
 # Compile with:
 
 `nvcc -o main main.cu`
