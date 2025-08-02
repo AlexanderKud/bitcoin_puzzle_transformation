@@ -24,7 +24,7 @@ main.exe 1000000000000000000000000000000000000000 1fffffffffffffffffffffffffffff
 main.exe 10000000000000000000 1fffffffffffffffffff 783c138ac81f6a52398564bb17455576e8525b29 32 32 # Puzzle 77
 ```
 
-> ⚠️ **Only use target hashes that start with `1`.**
+> ⚠️ **Only use target hashes that start with a private key range of `1`.**
 
 ---
 
