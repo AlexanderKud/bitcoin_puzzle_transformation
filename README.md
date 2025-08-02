@@ -1,63 +1,84 @@
-# This Bitcoin Puzzle searcher Uses GPU with transformations
+# 🔍 Bitcoin Puzzle Searcher (GPU with Transformations)
 
+This project is a **GPU-accelerated Bitcoin puzzle solver** using CUDA and a unique transformation-based algorithm. It applies a wide variety of bitwise transformations to explore the Bitcoin keyspace in a highly parallelized manner using thousands of GPU threads.
 
-## HOW TO USE:
+---
 
-`main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 - puzzle 21`
+## 🚀 How to Use
 
-`main.exe 1000000 1ffffff 2f396b29b27324300d0c59b17c3abc1835bd3dbb - puzzle 25`
+### Syntax
 
-`main.exe 100000000 1ffffffff 4e15e5189752d1eaf444dfd6bff399feb0443977 - puzzle 33`
+```
+main.exe <start_range> <end_range> <target_hash160> <blocks> <threads>
+```
 
-`main.exe 10000000000 1ffffffffff d1562eb37357f9e6fc41cb2359f4d3eda4032329 - puzzle 41`
+### Examples
 
-`main.exe 1000000000000000000 1ffffffffffffffffff 105b7f253f0ebd7843adaebbd805c944bfb863e4 - puzzle 73`
+```
+main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32      # Puzzle 21
+main.exe 1000000 1ffffff 2f396b29b27324300d0c59b17c3abc1835bd3dbb 32 32     # Puzzle 25
+main.exe 100000000 1ffffffff 4e15e5189752d1eaf444dfd6bff399feb0443977 32 32 # Puzzle 33
+main.exe 10000000000 1ffffffffff d1562eb37357f9e6fc41cb2359f4d3eda4032329 32 32 # Puzzle 41
+main.exe 1000000000000000000 1ffffffffffffffffff 105b7f253f0ebd7843adaebbd805c944bfb863e4 32 32 # Puzzle 73
+main.exe 1000000000000000000000000000000000000000 1fffffffffffffffffffffffffffffffffffffff 242d790e5a168043c76f0539fd894b73ee67b3b3 32 32 # Puzzle 157
+main.exe 10000000000000000000 1fffffffffffffffffff 783c138ac81f6a52398564bb17455576e8525b29 32 32 # Puzzle 77
+```
 
-`main.exe 1000000000000000000000000000000000000000 1fffffffffffffffffffffffffffffffffffffff 242d790e5a168043c76f0539fd894b73ee67b3b3 - puzzle 157`
+> ⚠️ **Only use target hashes that start with `1`.**
 
-`main.exe 10000000000000000000 1fffffffffffffffffff 783c138ac81f6a52398564bb17455576e8525b29 - puzzle 77`
-`
-# NOTE
+---
 
-you set the amount of blocks and threads like this:
+## ⚙️ Compilation
 
-###  32 blocks x 32 threads = 1024 threads
-`main.exe 100000 1fffff 29a78213caa9eea824acf08022ab9dfc83414f56 32 32`
+To compile the CUDA source:
 
-the current output print is done only in one thread, the others work silently, so no need to worry about speed slow downs
+```
+nvcc -o main main.cu
+```
 
-# Compile with:
+---
 
-`nvcc -o main main.cu`
+## 🧠 Algorithm Explanation
 
-# USE ONLY THE PUZZLES THAT START WITH 1
+This tool applies a sequence of **bitwise transformations** on randomly generated numbers within the specified range. These transformations include:
 
-## I'll explain how the transformation works:
+- Binary conversion of the number (e.g. `110011`)
+- Full cycle left bit shifts
+- For each shift, a vertical hex cycle from `0` to `F`
+- Binary reversal
+- Bit inversion
 
-1) a base random number is generated
-2) it is converted into a binary like "110011"
-3) a shift to the left is made (a full cycle)
-4) at each shift of 1 bit, a vertical cycle is made 16 times in hex from 0 to F
-5) a binary is reversed
-6) bits are inverted
-7) all this is done in cycles nested within each other
+All these operations are **deeply nested** and performed **in parallel** across thousands of GPU threads. As a result:
 
-all these operations occur in thousands of threads, the more powerful the GPU, the more parallel transformations
+- Each base number generates a large set of unique keys
+- There are no duplicate keys in a single transformation cycle
+- Extremely low probability of collisions unless base numbers are reused
 
-all keys within one full transformation are unique, there are no repetitions.... unless the base number itself is repeated (which is unlikely on large ranges)
+---
 
-proof that it works, you can check it on short puzzles, it works like a clock, on large ranges it will take more time of course, but this is a chance to try your luck in a different style
+## 🧪 Proof of Concept
 
-this algorithm is available both on python (CPU), and on GPU
+Try it on **short puzzles** (e.g., Puzzle 21) to verify correctness and speed. On larger ranges, the search will naturally take longer — but this offers a unique and parallel approach to discovering keys.
 
-I believe this is an effective way to search
+---
 
-# for questions and other things
-Author Telegram: **https://t.me/nmn5436**
+## 💻 CPU Version
 
-if you liked this idea or found something, my BTC address for donations:
-**bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk**
+The CPU (Python) version is available here:  
+👉 https://github.com/puzzleman22/Bitcoin-puzzle-transformations-CPU
 
-# NOTE
+---
 
-the CPU version is here **https://github.com/puzzleman22/Bitcoin-puzzle-transformations-CPU**
+## 📬 Contact
+
+For questions and discussions:  
+📨 [Telegram – @nmn5436](https://t.me/nmn5436)
+
+---
+
+## 🙏 Support
+
+If you like this project or find a key, consider donating:
+
+**BTC Address:**  
+`bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk`
