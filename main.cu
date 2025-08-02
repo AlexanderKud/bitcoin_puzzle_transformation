@@ -1387,7 +1387,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
  
 			for(int inv = 0; inv < 2; inv++) {
                 for(int z = 0; z < 2; z++) {
-                    for(int y = 0; y < length; y++) {
+                    //for(int y = 0; y < length; y++) {
                         for(int x = 0; x < 16; x++) {
 
 							binary_to_bigint_direct(binary, &priv2);
@@ -1406,7 +1406,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 							
 							local_keys_checked++;
 							
-							if(tid == 0 && inv == 0 && z == 0 && y == 0 && x == 0)
+							if(tid == 0 && inv == 0 && z == 0 && x == 0)
 							{
 								hash160_to_hex(hash160_out, hash160_str);
 								char hex_str[65];
@@ -1433,8 +1433,8 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 							}
 							binary_vertical_rotate_up(binary);
 						}
-						binary_rotate_left_by_one(binary);
-                    }
+					//	binary_rotate_left_by_one(binary);
+                   // }
                     reverseBinaryAfterFirst1(binary);
                 }
                 invertBinaryAfterFirst1(binary);
