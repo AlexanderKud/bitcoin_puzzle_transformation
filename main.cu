@@ -1384,61 +1384,52 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
         bigint_to_binary(&random_value, binary);
         
- 
-			for(int inv = 0; inv < 2; inv++) {
-                for(int z = 0; z < 2; z++) {
-                    //for(int y = 0; y < length; y++) {
-                        for(int x = 0; x < 16; x++) {
 
-							binary_to_bigint_direct(binary, &priv2);
-							
-							if (compare_bigint(&priv2, &const_n) >= 0) {
-								ptx_u256Sub(&priv, &priv2, &const_n);
-							} else {
-								copy_bigint(&priv, &priv2);
-							}
-							
-							
-							scalar_multiply_optimized(&result_jac, &const_G_jacobian, &priv);
-							jacobian_to_affine_fast(&public_key, &result_jac);
-							coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-							hash160(pubkey, 33, hash160_out);
-							
-							local_keys_checked++;
-							
-							if(tid == 0 && inv == 0 && z == 0 && x == 0)
-							{
-								hash160_to_hex(hash160_out, hash160_str);
-								char hex_str[65];
-								bigint_to_hex(&priv, hex_str);
-								printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-							}
-							
-							// Optimization 3: Early exit with minimal branching
-							if (compare_hash160_fast(hash160_out, target_bytes)) {
-								if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-									// Only convert to hex when found
-									binary_to_hex(binary, temp_hex);
-									hash160_to_hex(hash160_out, hash160_str);
-									
-									memcpy(g_found_hex, temp_hex, 65);
-									memcpy(g_found_hash160, hash160_str, 41);
-									
-									printf("\n*** FOUND! ***\n");
-									printf("Private Key: %s\n", temp_hex);
-									printf("Hash160: %s\n", hash160_str);
-								}
-								local_found = 1;
-								goto exit_loops; // Break all nested loops efficiently
-							}
-							binary_vertical_rotate_up(binary);
-						}
-					//	binary_rotate_left_by_one(binary);
-                   // }
-                    reverseBinaryAfterFirst1(binary);
-                }
-                invertBinaryAfterFirst1(binary);
-            }
+		for(int x = 0; x < 16; x++) {
+
+			binary_to_bigint_direct(binary, &priv2);
+			
+			if (compare_bigint(&priv2, &const_n) >= 0) {
+				ptx_u256Sub(&priv, &priv2, &const_n);
+			} else {
+				copy_bigint(&priv, &priv2);
+			}
+			
+			
+			scalar_multiply_optimized(&result_jac, &const_G_jacobian, &priv);
+			jacobian_to_affine_fast(&public_key, &result_jac);
+			coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+			hash160(pubkey, 33, hash160_out);
+			
+			local_keys_checked++;
+			
+			if(tid == 0 && x == 0)
+			{
+				hash160_to_hex(hash160_out, hash160_str);
+				char hex_str[65];
+				bigint_to_hex(&priv, hex_str);
+				printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
+			}
+			
+			// Optimization 3: Early exit with minimal branching
+			if (compare_hash160_fast(hash160_out, target_bytes)) {
+				if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+					// Only convert to hex when found
+					binary_to_hex(binary, temp_hex);
+					hash160_to_hex(hash160_out, hash160_str);
+					
+					memcpy(g_found_hex, temp_hex, 65);
+					memcpy(g_found_hash160, hash160_str, 41);
+					
+					printf("\n*** FOUND! ***\n");
+					printf("Private Key: %s\n", temp_hex);
+					printf("Hash160: %s\n", hash160_str);
+				}
+				local_found = 1;
+				goto exit_loops; // Break all nested loops efficiently
+			}
+			binary_vertical_rotate_up(binary);
+		}
         exit_loops:;
         c++;
     }
