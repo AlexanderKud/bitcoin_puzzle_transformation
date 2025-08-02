@@ -389,15 +389,7 @@ __device__ void bigint_add(const BigInt* a, const BigInt* b, BigInt* result) {
     }
 }
 
-// Fast PRNG with better mixing
-__device__ __forceinline__ uint64_t xorshift64(uint64_t* state) {
-    uint64_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    return x;
-}
+
 __device__ void generate_random_bigint_range_optimized(uint64_t* rng_state, const BigInt* min, const BigInt* max, BigInt* result) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -871,15 +863,7 @@ __device__ void clearLowest8Bits(BigInt* num) {
     num->data[0] &= 0xFFFFFF00;
 }
 
-// Helper function for better mixing (if not already defined)
-__device__ inline uint64_t mix(uint64_t x) {
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    x *= 0xc4ceb9fe1a85ec53ULL;
-    x ^= x >> 33;
-    return x;
-}
+
 // Convert BigInt to binary string
 __device__ void bigint_to_binary(const BigInt* bigint, char* binary_str) {
     int idx = 0;
@@ -1119,20 +1103,6 @@ __device__ void binary_to_bigint_direct(const char* binary, BigInt* result) {
     }
 }
 
-// Optimization 5: Faster hash160 comparison (implement this)
-__device__ __forceinline__ bool compare_hash160_fast(const uint8_t* hash1, const uint8_t* hash2) {
-    // Use 64-bit comparisons instead of byte-by-byte
-    const uint64_t* h1 = (const uint64_t*)hash1;
-    const uint64_t* h2 = (const uint64_t*)hash2;
-    
-    return (h1[0] == h2[0]) && (h1[1] == h2[1]) && 
-           (*(uint32_t*)(hash1 + 16) == *(uint32_t*)(hash2 + 16));
-}
-
-
-__device__ volatile int g_found = 0;
-__device__ char g_found_hex[65] = {0};        // Original hex
-__device__ char g_found_hash160[41] = {0};    // Hash160 result
 
 // Add pair swap function
 __device__ void binary_pair_swap(char* binary) {
@@ -1255,21 +1225,72 @@ __device__ uint64_t fast_rng(uint64_t* state) {
     return *state;
 }
 
-// Optimized hash160 comparison using vectorized loads
-__device__ bool compare_hash160_fast_vectorized(const uint8_t* hash1, const uint8_t* target) {
-    const uint4 h1 = *((uint4*)hash1);
-    const uint4 h2 = *((uint4*)target);
-    const uint32_t h1_tail = *((uint32_t*)(hash1 + 16));
-    const uint32_t h2_tail = *((uint32_t*)(target + 16));
-    
-    return (h1.x == h2.x) && (h1.y == h2.y) && 
-           (h1.z == h2.z) && (h1.w == h2.w) && (h1_tail == h2_tail);
+
+__device__ volatile unsigned long long g_total_keys = 0;
+__device__ volatile int g_found = 0;
+__device__ char g_found_hex[65];
+__device__ char g_found_hash160[41];
+
+// Shared memory for cooperative operations
+__shared__ uint8_t shared_target[20];
+__shared__ int shared_found;
+
+// Optimized RNG mixing function
+__device__ __forceinline__ uint64_t mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
 }
 
+// Optimized xorshift64
+__device__ __forceinline__ uint64_t xorshift64(uint64_t* state) {
+    uint64_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    return x;
+}
 
-__device__ volatile unsigned long long g_total_keys = 0;  // Global counter for all keys checked
+// Optimized hash comparison using 32-bit operations
+__device__ __forceinline__ bool compare_hash160_fast(const uint8_t* hash1, const uint8_t* hash2) {
+    // Compare as 5 uint32_t values for better memory access
+    const uint32_t* h1 = (const uint32_t*)hash1;
+    const uint32_t* h2 = (const uint32_t*)hash2;
+    
+    #pragma unroll
+    for (int i = 0; i < 5; i++) {
+        if (h1[i] != h2[i]) return false;
+    }
+    return true;
+}
+
+// Warp-level synchronization for better performance
+__device__ __forceinline__ void warp_sync() {
+    __syncwarp();
+}
 
 __global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
+    // Initialize shared memory cooperatively
+    if (threadIdx.x < 20) {
+        uint8_t val = 0;
+        if (threadIdx.x * 2 < 40) {
+            char c1 = target[threadIdx.x * 2];
+            char c2 = target[threadIdx.x * 2 + 1];
+            val = ((c1 >= 'a' ? c1 - 'a' + 10 : c1 - '0') << 4) |
+                   (c2 >= 'a' ? c2 - 'a' + 10 : c2 - '0');
+        }
+        shared_target[threadIdx.x] = val;
+    }
+    if (threadIdx.x == 0) {
+        shared_found = 0;
+    }
+    __syncthreads();
+    
+    // Print info only once
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("min: %s\n", minRangePure);
         printf("max: %s\n", maxRangePure);
@@ -1279,215 +1300,224 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total_threads = gridDim.x * blockDim.x;
     int length = str_len(minRangePure) - 1;
-    // Move these outside the loop - they don't change
-    char minRange[65];
+    
+    // Pre-allocate all working variables in registers
+    char minRange[65], maxRange[65];
     leftPad64(minRange, minRangePure);
-    char maxRange[65];
     leftPad64(maxRange, maxRangePure);
     
-    // Convert min/max to BigInt once outside the loop
-    BigInt min, max;
+    BigInt min, max, random_value, priv;
     hex_to_bigint(minRange, &min);
     hex_to_bigint(maxRange, &max);
     
-    // Pre-allocate all working variables
-    BigInt random_value, priv2, priv;
+    // Use texture memory for constant data if available
+    const ECPointJac G_cached = const_G_jacobian;
+    
+    // Thread-local variables
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
     uint8_t hash160_out[20];
     char hex[65];
-    char hash160_str[41];
     
-    // Improved seeding with better entropy mixing
+    // Enhanced RNG initialization
     uint64_t seed = clock64();
     seed ^= ((uint64_t)tid << 32) | ((uint64_t)blockIdx.x << 16) | threadIdx.x;
     seed = mix(seed);
     seed ^= ((uint64_t)gridDim.x << 48) | ((uint64_t)blockDim.x << 32);
+    
+    // Use multiple RNG states for better randomness
     uint64_t rng_state = mix(seed);
-    
-    // Add secondary RNG state for better period
     uint64_t rng_state2 = mix(seed ^ 0xDEADBEEF12345678ULL);
-    const ECPointJac G_cached = const_G_jacobian;
+    uint64_t rng_state3 = mix(seed ^ 0x123456789ABCDEF0ULL);
+    
     int c = 0;
-    // Use thread-local found flag for early exit
-    int local_found = 0;
-    
-    // Pre-convert target hex to bytes for faster comparison
-    uint8_t target_bytes[20];
-    hex_string_to_bytes(target, target_bytes, 20);
-    
-    // Performance tracking variables
     unsigned long long local_keys_checked = 0;
     unsigned long long last_report_keys = 0;
     clock_t start_time = clock64();
     clock_t last_report_time = start_time;
     
-    while(local_found == 0 && g_found == 0) {
-        // Generate random value in range
+    // Main loop with optimizations
+    while (shared_found == 0 && g_found == 0) {
+        // Generate random value with triple RNG mixing
         generate_random_bigint_range_optimized(&rng_state, &min, &max, &random_value);
         
-        // Mix in second RNG state periodically
-        if ((c & 0xFF) == 0) {
-            rng_state ^= xorshift64(&rng_state2);
+        // Mix RNG states periodically for better entropy
+        if ((c & 0x3F) == 0) {  // Every 64 iterations
+            uint64_t temp = xorshift64(&rng_state2);
+            rng_state ^= temp;
+            rng_state3 = mix(rng_state3 ^ temp);
         }
         
-        // Convert to hex once
         bigint_to_hex(&random_value, hex);
         
-        // Unroll the outer loops for better performance
+        // Process variations with aggressive unrolling
         #pragma unroll 2
-        for(int inv = 0; inv < 2; inv++) {
+        for (int inv = 0; inv < 2; inv++) {
+            if (shared_found) break;
+            
             #pragma unroll 2
-            for(int z = 0; z < 2; z++) {
-				
-				for(int y = 0; y < length; y++)
-				{
-					// Process 16 variations
-					#pragma unroll 4
-					for(int x = 0; x < 16; x++) {
-						// Convert hex to bigint
-						hex_to_bigint(hex, &priv2);
-						
-						// Use direct assignment instead of copy_bigint if possible
-						priv = priv2;
-						
-						// Scalar multiplication with cached base point
-						scalar_multiply_optimized(&result_jac, &G_cached, &priv);
-						jacobian_to_affine_fast(&public_key, &result_jac);
-						
-						// Generate compressed public key
-						coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-						
-						
-						// Compute hash160
-						hash160(pubkey, 33, hash160_out);
-						
-						// Increment local counter
-						local_keys_checked++;
-						
-						// Performance reporting - only one thread reports
-						if (tid == 0 && (local_keys_checked - last_report_keys) >= 10000) {
-							clock_t current_time = clock64();
-							double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0; // clock64 is in nanoseconds
-							
-							if (elapsed_seconds >= 1.0) { // Report every second
-								// Update global counter
-								unsigned long long keys_this_period = local_keys_checked - last_report_keys;
-								atomicAdd((unsigned long long*)&g_total_keys, keys_this_period * total_threads);
-								
-								// Calculate and display speed
-								double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
-								double total_elapsed = (double)(current_time - start_time) / 1000000000.0;
-								unsigned long long total_keys = g_total_keys;
-								
-								printf("[%.1f s] Speed: %.2f MKey/s | Total keys: %.2f billion | Current: %s\n", 
-									   total_elapsed,
-									   keys_per_second / 1000000.0,
-									   total_keys / 1000000000.0,
-									   hex);
-								
-								last_report_keys = local_keys_checked;
-								last_report_time = current_time;
-							}
-						}
-						
-						// Check if we found the target - use optimized comparison
-						if (compare_hash160(hash160_out, target_bytes)) {
-							// Try to claim the found flag atomically
-							if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-								// Convert hash160 to string
-								hash160_to_hex(hash160_out, hash160_str);
-								
-								// Copy results to global memory
-								int hex_len = d_strlen(hex);
-								// Use single memcpy for efficiency
-								memcpy(g_found_hex, hex, hex_len + 1);
-								memcpy(g_found_hash160, hash160_str, 41);
-								
-								printf("\n*** FOUND! ***\n");
-								printf("Private Key: %s\n", hex);
-								printf("Hash160: %s\n", hash160_str);
-								printf("Total keys checked: %.2f billion\n", g_total_keys / 1000000000.0);
-							}
-							local_found = 1;
-							break;
-						}
-						
-						// Rotate hex for next iteration
-						hex_vertical_rotate_up(hex);
-					}
-					hex_rotate_right_by_one(hex);
-				}
-                if (local_found) break;
+            for (int z = 0; z < 2; z++) {
+                if (shared_found) break;
+                
+                // Process length variations
+                for (int y = 0; y < length; y++) {
+                    if (shared_found) break;
+                    
+                    // Process 16 hex rotations with maximum unrolling
+                    #pragma unroll 16
+                    for (int x = 0; x < 16; x++) {
+                        // Direct hex to bigint conversion
+                        hex_to_bigint(hex, &priv);
+                        
+                        // Optimized scalar multiplication
+                        scalar_multiply_optimized(&result_jac, &G_cached, &priv);
+                        jacobian_to_affine_fast(&public_key, &result_jac);
+                        
+                        // Generate compressed public key
+                        coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+                        
+                        // Compute hash160
+                        hash160(pubkey, 33, hash160_out);
+                        
+                        local_keys_checked++;
+                        
+                        // Fast comparison using shared memory target
+                        if (compare_hash160_fast(hash160_out, shared_target)) {
+                            // Try to claim the found flag
+                            if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+                                // Convert results
+                                char hash160_str[41];
+                                hash160_to_hex(hash160_out, hash160_str);
+                                
+                                // Copy to global memory
+                                memcpy(g_found_hex, hex, d_strlen(hex) + 1);
+                                memcpy(g_found_hash160, hash160_str, 41);
+                                
+                                printf("\n*** FOUND! ***\n");
+                                printf("Private Key: %s\n", hex);
+                                printf("Hash160: %s\n", hash160_str);
+                                printf("Total keys checked: %.2f billion\n", 
+                                       (g_total_keys + local_keys_checked) / 1000000000.0);
+                            }
+                            shared_found = 1;
+                            break;
+                        }
+                        
+                        // Rotate hex for next iteration
+                        hex_vertical_rotate_up(hex);
+                    }
+                    
+                    // Move to next position
+                    hex_rotate_right_by_one(hex);
+                }
+                
+                // Apply transformation
                 reverseAfterFirst1(hex);
             }
-            if (local_found) break;
+            
+            // Apply inversion
             invertHexAfterFirst1(hex);
         }
+        
         c++;
         
-        // Periodic reseeding for very long runs
-        if ((c & 0xFFFFF) == 0) {
-            rng_state ^= clock64();
-            rng_state = mix(rng_state);
+        // Performance reporting with reduced overhead
+        if (tid == 0 && c % 1 == 0) {
+            clock_t current_time = clock64();
+            double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0;
+            
+            if (elapsed_seconds >= 1.0) {
+                unsigned long long keys_this_period = local_keys_checked - last_report_keys;
+                atomicAdd((unsigned long long*)&g_total_keys, keys_this_period * total_threads);
+                
+                double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
+                unsigned long long total_keys = g_total_keys;
+                
+                printf("Speed: %.2f MKey/s | Total: %.2f billion | Block %d\n", 
+                       keys_per_second / 1000000.0,
+                       total_keys / 1000000000.0,
+                       blockIdx.x);
+                
+                last_report_keys = local_keys_checked;
+                last_report_time = current_time;
+            }
+        }
+        
+        // Advanced reseeding strategy
+        if ((c & 0x3FFFF) == 0) {  // Every ~262k iterations
+            uint64_t new_entropy = clock64() ^ ((uint64_t)c << 32);
+            rng_state = mix(rng_state ^ new_entropy);
+            rng_state2 = mix(rng_state2 ^ (new_entropy << 1));
+            rng_state3 = mix(rng_state3 ^ (new_entropy >> 1));
         }
     }
     
-    // Final update of global counter when thread exits
+    // Final counter update
     if (local_keys_checked > last_report_keys) {
         atomicAdd((unsigned long long*)&g_total_keys, local_keys_checked - last_report_keys);
     }
 }
+
+// Optimized main function with better GPU configuration
 int main(int argc, char* argv[]) {
     if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " (required <min> <max> <target>) (optional <blocks> <threads>)" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <min> <max> <target> [blocks] [threads] [device_id]" << std::endl;
         return 1;
     }
     
     try {
-		
         int device_id = (argc >= 7) ? std::stoi(argv[6]) : 0;
-
-        // Check if device exists
+        
+        // Device validation and setup
         int device_count = 0;
         cudaGetDeviceCount(&device_count);
         if (device_id < 0 || device_id >= device_count) {
-            std::cerr << "Invalid device ID: " << device_id
+            std::cerr << "Invalid device ID: " << device_id 
                       << ". Available devices: 0 to " << (device_count - 1) << std::endl;
             return 1;
         }
-
-        // Set device
+        
         cudaSetDevice(device_id);
-
-        std::cout << "Using CUDA device " << device_id << std::endl;
-		initialize_secp256k1_gpu();
         
-        // Allocate device memory for 3 strings
+        // Get device properties for optimal configuration
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device_id);
+        
+        std::cout << "Using " << prop.name << " (Device " << device_id << ")" << std::endl;
+        std::cout << "SM Count: " << prop.multiProcessorCount << std::endl;
+        std::cout << "Max threads per block: " << prop.maxThreadsPerBlock << std::endl;
+        
+        // Initialize secp256k1 on GPU
+        initialize_secp256k1_gpu();
+        
+        // Allocate device memory
         char *d_param1, *d_param2, *d_param3;
-        
-        // Get string lengths
         size_t len1 = strlen(argv[1]) + 1;
         size_t len2 = strlen(argv[2]) + 1;
         size_t len3 = strlen(argv[3]) + 1;
         
-        // Allocate and copy in one operation each
         cudaMalloc(&d_param1, len1);
-        cudaMemcpy(d_param1, argv[1], len1, cudaMemcpyHostToDevice);
-        
         cudaMalloc(&d_param2, len2);
-        cudaMemcpy(d_param2, argv[2], len2, cudaMemcpyHostToDevice);
-        
         cudaMalloc(&d_param3, len3);
+        
+        cudaMemcpy(d_param1, argv[1], len1, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_param2, argv[2], len2, cudaMemcpyHostToDevice);
         cudaMemcpy(d_param3, argv[3], len3, cudaMemcpyHostToDevice);
         
-        // Parse grid configuration
-        int blocks = (argc >= 5) ? std::stoi(argv[4]) : 32;
-        int threads = (argc >= 6) ? std::stoi(argv[5]) : 32;
+        // Optimize grid configuration based on GPU
+        int blocks = (argc >= 5) ? std::stoi(argv[4]) : prop.multiProcessorCount * 2;
+        int threads = (argc >= 6) ? std::stoi(argv[5]) : 256;  // 256 is often optimal
         
-        printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
-               blocks, threads, blocks * threads);
+        // Ensure threads is a multiple of warp size (32)
+        threads = ((threads + 31) / 32) * 32;
+        threads = std::min(threads, prop.maxThreadsPerBlock);
+        
+        printf("Launching with %d blocks and %d threads\n", blocks, threads);
+        printf("Total parallel threads: %d\n\n", blocks * threads);
+        
+        // Set cache configuration for better performance
+        cudaFuncSetCacheConfig(start_optimized, cudaFuncCachePreferL1);
         
         // Launch kernel
         start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
@@ -1495,7 +1525,7 @@ int main(int argc, char* argv[]) {
         // Wait for completion
         cudaDeviceSynchronize();
         
-        // Check if solution was found
+        // Check results
         int found_flag;
         cudaMemcpyFromSymbol(&found_flag, g_found, sizeof(int));
         
@@ -1503,11 +1533,10 @@ int main(int argc, char* argv[]) {
             char found_hex[65];
             char found_hash160[41];
             
-            // Copy results from device
             cudaMemcpyFromSymbol(found_hex, g_found_hex, 65);
             cudaMemcpyFromSymbol(found_hash160, g_found_hash160, 41);
             
-            // Save to file with timestamp
+            // Save to file
             std::ofstream outfile("result.txt", std::ios::app);
             if (outfile.is_open()) {
                 std::time_t now = std::time(nullptr);
@@ -1518,29 +1547,23 @@ int main(int argc, char* argv[]) {
                 outfile << "[" << timestamp << "] Found: " << found_hex 
                        << " -> " << found_hash160 << std::endl;
                 outfile.close();
-                std::cout << "Result appended to result.txt" << std::endl;
-            } else {
-                std::cerr << "Unable to open file for writing" << std::endl;
+                std::cout << "Result saved to result.txt" << std::endl;
             }
         }
         
-        // Check for CUDA errors
+        // Error checking
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             std::cerr << "CUDA error: " << cudaGetErrorString(err) << std::endl;
-            cudaFree(d_param1);
-            cudaFree(d_param2);
-            cudaFree(d_param3);
-            return 1;
         }
         
-        // Clean up
+        // Cleanup
         cudaFree(d_param1);
         cudaFree(d_param2);
         cudaFree(d_param3);
         
     } catch (const std::exception& e) {
-        std::cerr << "An error occurred: " << e.what() << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         cudaDeviceReset();
         return 1;
     }

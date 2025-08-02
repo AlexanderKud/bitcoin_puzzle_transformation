@@ -41,11 +41,26 @@ __constant__ BigInt const_p;
 __constant__ ECPointJac const_G_jacobian;
 __constant__ BigInt const_n;
 
+// Montgomery constants
+__constant__ BigInt mont_R2_mod_p;    // R^2 mod p where R = 2^256
+__constant__ uint32_t mont_k0 = 0xD2253531;  // -p[0]^(-1) mod 2^32 for secp256k1
+
+// Cached Montgomery form of common values
+__constant__ BigInt const_one_mont;      // Montgomery form of 1
+__constant__ BigInt const_two_mont;      // Montgomery form of 2
+__constant__ BigInt const_three_mont;    // Montgomery form of 3
+__constant__ BigInt const_four_mont;     // Montgomery form of 4
+__constant__ BigInt const_eight_mont;    // Montgomery form of 8
+
 // Precomputed table for base point G
 __device__ ECPointJac *d_precomp_G = nullptr;
 
-// Host function to initialize precomputed table
+// Host function declarations
 void init_precomputed_table_host();
+void host_init_bigint(BigInt *x, uint32_t val);
+void host_copy_bigint(BigInt *dest, const BigInt *src);
+void host_point_set_infinity_jac(ECPointJac *P);
+void host_point_copy_jac(ECPointJac *dest, const ECPointJac *src);
 
 __host__ __device__ __forceinline__ void init_bigint(BigInt *x, uint32_t val) {
     x->data[0] = val;
@@ -53,6 +68,7 @@ __host__ __device__ __forceinline__ void init_bigint(BigInt *x, uint32_t val) {
 }
 
 __host__ __device__ __forceinline__ void copy_bigint(BigInt *dest, const BigInt *src) {
+    #pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
         dest->data[i] = src->data[i];
     }
@@ -118,56 +134,28 @@ __device__ __forceinline__ void ptx_u256Sub(BigInt *res, const BigInt *a, const 
     );
 }
 
-// Optimized multiply_bigint_by_const with unrolling
-__device__ __forceinline__ void multiply_bigint_by_const(const BigInt *a, uint32_t c, uint32_t result[9]) {
-    uint64_t carry = 0;
-    
-    #pragma unroll
-    for (int i = 0; i < BIGINT_WORDS; i++) {
-        uint64_t prod = (uint64_t)a->data[i] * c + carry;
-        result[i] = (uint32_t)prod;
-        carry = prod >> 32;
+__device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
+    BigInt temp;
+    if (compare_bigint(a, b) < 0) {
+         BigInt sum;
+         ptx_u256Add(&sum, a, &const_p);
+         ptx_u256Sub(&temp, &sum, b);
+    } else {
+         ptx_u256Sub(&temp, a, b);
     }
-    result[8] = (uint32_t)carry;
+    copy_bigint(res, &temp);
 }
 
-// Optimized shift_left_word
-__device__ __forceinline__ void shift_left_word(const BigInt *a, uint32_t result[9]) {
-    result[0] = 0;
-    
-    #pragma unroll
-    for (int i = 0; i < BIGINT_WORDS; i++) {
-        result[i+1] = a->data[i];
-    }
-}
-
-// Optimized add_9word with unrolling
-__device__ __forceinline__ void add_9word(uint32_t r[9], const uint32_t addend[9]) {
-    uint64_t carry = 0;
-    
-    #pragma unroll
-    for (int i = 0; i < 9; i++) {
-        uint64_t sum = (uint64_t)r[i] + addend[i] + carry;
-        r[i] = (uint32_t)sum;
-        carry = sum >> 32;
-    }
-}
-
-__device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], BigInt *res) {
-    for (int i = 0; i < BIGINT_WORDS; i++) {
-        res->data[i] = r[i];
-    }
-}
-__device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
+// Original multiplication function (needed to avoid circular dependency)
+__device__ __forceinline__ void mul_mod_device_original(BigInt *res, const BigInt *a, const BigInt *b) {
     uint32_t prod[16] = {0};
     
-    // Multiplication phase - optimized with better memory access patterns
+    // Multiplication phase
     #pragma unroll
     for (int i = 0; i < 8; i++) {
         uint64_t carry = 0;
         uint32_t ai = a->data[i];
         
-        // Use PTX for the inner loop multiplication
         #pragma unroll
         for (int j = 0; j < 8; j++) {
             uint64_t tmp = (uint64_t)prod[i + j] + (uint64_t)ai * b->data[j] + carry;
@@ -217,16 +205,15 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     {
         uint64_t sum = (uint64_t)Rext[8] + H.data[7] + carry;
         Rext[8] = (uint32_t)sum;
-        // Any overflow beyond this is handled next
     }
     
-    // Handle overflow exactly as in original
+    // Handle overflow
     if (Rext[8]) {
         BigInt extraBI;
         init_bigint(&extraBI, Rext[8]);
         Rext[8] = 0;
         
-        // Compute extra977 = extraBI * 977 (optimized for single word)
+        // Compute extra977 = extraBI * 977
         uint64_t prod = (uint64_t)extraBI.data[0] * 977;
         uint32_t extra977_low = (uint32_t)prod;
         uint32_t extra977_high = (uint32_t)(prod >> 32);
@@ -240,7 +227,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         Rext[1] = (uint32_t)sum;
         carry = (sum >> 32);
         
-        // Propagate carry if needed
+        // Propagate carry
         for (int i = 2; i < 9 && carry; i++) {
             sum = (uint64_t)Rext[i] + carry;
             Rext[i] = (uint32_t)sum;
@@ -255,7 +242,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         R_temp.data[i] = Rext[i];
     }
     
-    // Final reductions - exactly as original
+    // Final reductions
     if (Rext[8] || compare_bigint(&R_temp, &const_p) >= 0) {
         ptx_u256Sub(&R_temp, &R_temp, &const_p);
     }
@@ -266,58 +253,146 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     copy_bigint(res, &R_temp);
 }
 
-__device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
-    BigInt temp;
-    if (compare_bigint(a, b) < 0) {
-         BigInt sum;
-         ptx_u256Add(&sum, a, &const_p);
-         ptx_u256Sub(&temp, &sum, b);
-    } else {
-         ptx_u256Sub(&temp, a, b);
-    }
-    copy_bigint(res, &temp);
-}
-
-__device__ void mod_inverse_fast(BigInt *res, const BigInt *a) {
-    BigInt R0, R1;
-    init_bigint(&R0, 1);
-    copy_bigint(&R1, a);
-    
-    // Process from MSB (bit 255) to LSB (bit 0)
-    // p-2 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2D
-    
-    // Handle bits 255-33 (all are 1s in p-2)
+// Montgomery reduction
+__device__ __forceinline__ void montgomery_reduce(BigInt *res, const uint32_t T_input[16]) {
+    uint32_t T[16];
     #pragma unroll
-    for (int i = 255; i >= 33; i--) {
-        // bit = 1, so always:
-        mul_mod_device(&R0, &R0, &R1);    // R0 = R0 * R1
-        mul_mod_device(&R1, &R1, &R1);    // R1 = R1^2
+    for (int i = 0; i < 16; i++) {
+        T[i] = T_input[i];
     }
     
-    // Handle bit 32 (which is 0 in p-2)
-    mul_mod_device(&R1, &R0, &R1);       // R1 = R0 * R1
-    mul_mod_device(&R0, &R0, &R0);       // R0 = R0^2
-    
-    // Handle bits 31-0 with the correct pattern
-    // The low 32 bits of p-2 are 0xFFFFFC2D
-    // We need to process from bit 31 down to bit 0
-    
-    #pragma unroll 32
-    for (int i = 31; i >= 0; i--) {
-        uint32_t bit = (0xFFFFFC2D >> i) & 1;
+    // CIOS Montgomery reduction
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        uint32_t q = T[i] * mont_k0;
+        uint64_t carry = 0;
         
-        if (bit == 1) {
-            mul_mod_device(&R0, &R0, &R1);    // R0 = R0 * R1
-            mul_mod_device(&R1, &R1, &R1);    // R1 = R1^2
-        } else {
-            mul_mod_device(&R1, &R0, &R1);    // R1 = R0 * R1
-            mul_mod_device(&R0, &R0, &R0);    // R0 = R0^2
+        #pragma unroll
+        for (int j = 0; j < 8; j++) {
+            uint64_t prod = (uint64_t)q * const_p.data[j];
+            uint64_t sum = (uint64_t)T[i + j] + (uint32_t)prod + carry;
+            T[i + j] = (uint32_t)sum;
+            carry = (prod >> 32) + (sum >> 32);
+        }
+        
+        for (int j = i + 8; j < 16 && carry; j++) {
+            uint64_t sum = (uint64_t)T[j] + carry;
+            T[j] = (uint32_t)sum;
+            carry = sum >> 32;
         }
     }
     
-    copy_bigint(res, &R0);
+    // Result is in T[8..15]
+    BigInt temp;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        temp.data[i] = T[i + 8];
+    }
+    
+    // Final reduction
+    if (compare_bigint(&temp, &const_p) >= 0) {
+        ptx_u256Sub(res, &temp, &const_p);
+    } else {
+        copy_bigint(res, &temp);
+    }
 }
 
+// Convert to Montgomery form
+__device__ __forceinline__ void to_montgomery(BigInt *res, const BigInt *a) {
+    mul_mod_device_original(res, a, &mont_R2_mod_p);
+}
+
+// Convert from Montgomery form
+__device__ __forceinline__ void from_montgomery(BigInt *res, const BigInt *a_mont) {
+    uint32_t T[16] = {0};
+    
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        T[i] = a_mont->data[i];
+    }
+    
+    montgomery_reduce(res, T);
+}
+
+// Montgomery multiplication
+__device__ __forceinline__ void montgomery_mul(BigInt *res, const BigInt *a, const BigInt *b) {
+    uint32_t T[16] = {0};
+    
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        uint64_t carry = 0;
+        uint32_t ai = a->data[i];
+        
+        #pragma unroll
+        for (int j = 0; j < 8; j++) {
+            uint64_t prod = (uint64_t)ai * b->data[j];
+            uint64_t sum = (uint64_t)T[i + j] + (uint32_t)prod + carry;
+            T[i + j] = (uint32_t)sum;
+            carry = (prod >> 32) + (sum >> 32);
+        }
+        T[i + 8] = (uint32_t)carry;
+    }
+    
+    montgomery_reduce(res, T);
+}
+
+// Montgomery squaring
+__device__ __forceinline__ void montgomery_square(BigInt *res, const BigInt *a) {
+    uint32_t T[16] = {0};
+    
+    // Diagonal elements
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        uint64_t prod = (uint64_t)a->data[i] * a->data[i];
+        T[2 * i] = (uint32_t)prod;
+        T[2 * i + 1] = (uint32_t)(prod >> 32);
+    }
+    
+    // Off-diagonal elements
+    #pragma unroll
+    for (int i = 0; i < 7; i++) {
+        for (int j = i + 1; j < 8; j++) {
+            uint64_t prod = (uint64_t)a->data[i] * a->data[j];
+            uint64_t prod2 = prod << 1;
+            
+            uint64_t sum = (uint64_t)T[i + j] + (uint32_t)prod2;
+            T[i + j] = (uint32_t)sum;
+            
+            int k = i + j + 1;
+            uint64_t carry = (prod2 >> 32) + (sum >> 32);
+            while (k < 16 && carry) {
+                sum = (uint64_t)T[k] + carry;
+                T[k] = (uint32_t)sum;
+                carry = sum >> 32;
+                k++;
+            }
+        }
+    }
+    
+    montgomery_reduce(res, T);
+}
+
+// Wrapper for compatibility
+__device__ __forceinline__ void mul_mod_montgomery(BigInt *res, const BigInt *a, const BigInt *b) {
+    BigInt a_mont, b_mont;
+    to_montgomery(&a_mont, a);
+    to_montgomery(&b_mont, b);
+    
+    BigInt res_mont;
+    montgomery_mul(&res_mont, &a_mont, &b_mont);
+    
+    from_montgomery(res, &res_mont);
+}
+
+// Main multiplication function - choose implementation here
+__device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
+    // For now, use original implementation for stability
+    // Switch to mul_mod_montgomery(res, a, b) when ready for Montgomery
+    mul_mod_device_original(res, a, b);
+	//mul_mod_montgomery(res, a, b);
+}
+
+// Point operations
 __device__ __forceinline__ void point_set_infinity_jac(ECPointJac *P) {
     P->infinity = true;
 }
@@ -329,8 +404,38 @@ __device__ __forceinline__ void point_copy_jac(ECPointJac *dest, const ECPointJa
     dest->infinity = src->infinity;
 }
 
-__device__ void double_point_jac(ECPointJac *R, const ECPointJac *P); // 声明
-__device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJac *Q); // 声明
+__device__ void mod_inverse_fast(BigInt *res, const BigInt *a) {
+    BigInt R0, R1;
+    init_bigint(&R0, 1);
+    copy_bigint(&R1, a);
+    
+    #pragma unroll
+    for (int i = 255; i >= 33; i--) {
+        mul_mod_device(&R0, &R0, &R1);
+        mul_mod_device(&R1, &R1, &R1);
+    }
+    
+    mul_mod_device(&R1, &R0, &R1);
+    mul_mod_device(&R0, &R0, &R0);
+    
+    #pragma unroll 32
+    for (int i = 31; i >= 0; i--) {
+        uint32_t bit = (0xFFFFFC2D >> i) & 1;
+        
+        if (bit == 1) {
+            mul_mod_device(&R0, &R0, &R1);
+            mul_mod_device(&R1, &R1, &R1);
+        } else {
+            mul_mod_device(&R1, &R0, &R1);
+            mul_mod_device(&R0, &R0, &R0);
+        }
+    }
+    
+    copy_bigint(res, &R0);
+}
+
+__device__ void double_point_jac(ECPointJac *R, const ECPointJac *P);
+__device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJac *Q);
 
 __device__ void double_point_jac(ECPointJac *R, const ECPointJac *P) {
     if (P->infinity || is_zero(&P->Y)) {
@@ -412,7 +517,6 @@ __device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJ
     R->infinity = false;
 }
 
-
 __device__ void jacobian_to_affine_fast(ECPoint *R, const ECPointJac *P) {
     if (P->infinity) {
         R->infinity = true;
@@ -421,7 +525,7 @@ __device__ void jacobian_to_affine_fast(ECPoint *R, const ECPointJac *P) {
         return;
     }
     BigInt Zinv, Zinv2, Zinv3;
-    mod_inverse_fast(&Zinv, &P->Z);  // <-- Use fast inverse here
+    mod_inverse_fast(&Zinv, &P->Z);
     mul_mod_device(&Zinv2, &Zinv, &Zinv);
     mul_mod_device(&Zinv3, &Zinv2, &Zinv);
     mul_mod_device(&R->x, &P->X, &Zinv2);
@@ -429,20 +533,16 @@ __device__ void jacobian_to_affine_fast(ECPoint *R, const ECPointJac *P) {
     R->infinity = false;
 }
 
-
-// General scalar multiplication for arbitrary points (using shared memory)
+// General scalar multiplication
 __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
     const int SHARED_WINDOW_SIZE = 4;
     const int SHARED_PRECOMP_SIZE = 1 << SHARED_WINDOW_SIZE;
     
-    // Use shared memory for precomputed points
     __shared__ ECPointJac shared_precomp[1 << SHARED_WINDOW_SIZE];
     
-    // Collaborative precomputation using threads in the block
     int tid = threadIdx.x;
     int block_size = blockDim.x;
     
-    // Each thread computes some precomputed points
     for (int i = tid; i < SHARED_PRECOMP_SIZE; i += block_size) {
         if (i == 0) {
             point_set_infinity_jac(&shared_precomp[0]);
@@ -453,10 +553,8 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
         }
     }
     
-    // Ensure all threads have finished precomputation
     __syncthreads();
     
-    // Find the highest non-zero bit
     int highest_bit = BIGINT_WORDS * 32 - 1;
     for (; highest_bit >= 0; highest_bit--) {
         if (get_bit(scalar, highest_bit)) break;
@@ -467,22 +565,17 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
         return;
     }
     
-    // Initialize result
     ECPointJac res;
     point_set_infinity_jac(&res);
     
-    // Process scalar in windows of SHARED_WINDOW_SIZE bits
     int i = highest_bit;
     while (i >= 0) {
-        // Determine window size for this iteration
         int window_bits = (i >= SHARED_WINDOW_SIZE - 1) ? SHARED_WINDOW_SIZE : (i + 1);
         
-        // Double 'window_bits' times
         for (int j = 0; j < window_bits; j++) {
             double_point_jac(&res, &res);
         }
         
-        // Extract window value
         int window_value = 0;
         for (int j = 0; j < window_bits; j++) {
             if (i - j >= 0 && get_bit(scalar, i - j)) {
@@ -490,7 +583,6 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
             }
         }
         
-        // Add precomputed point if window value is non-zero
         if (window_value > 0) {
             add_point_jac(&res, &res, &shared_precomp[window_value]);
         }
@@ -501,7 +593,6 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
     point_copy_jac(result, &res);
 }
 
-// Helper function to check if a point equals the base point G
 __device__ bool is_base_point_G(const ECPointJac *point) {
     return (compare_bigint(&point->X, &const_G_jacobian.X) == 0 &&
             compare_bigint(&point->Y, &const_G_jacobian.Y) == 0 &&
@@ -509,19 +600,15 @@ __device__ bool is_base_point_G(const ECPointJac *point) {
             point->infinity == const_G_jacobian.infinity);
 }
 
-// Modified scalar multiplication to use global memory
 __device__ void scalar_multiply_G_precomputed_large(ECPointJac *result, const BigInt *scalar) {
     ECPointJac res;
     point_set_infinity_jac(&res);
     
-    // Process from highest bit to lowest in PRECOMP_BITS chunks
     for (int i = 256 - PRECOMP_BITS; i >= 0; i -= PRECOMP_BITS) {
-        // Double for the window size
         for (int j = 0; j < PRECOMP_BITS; j++) {
             double_point_jac(&res, &res);
         }
         
-        // Extract window value correctly (big-endian style)
         uint32_t window = 0;
         for (int j = PRECOMP_BITS - 1; j >= 0; j--) {
             window <<= 1;
@@ -530,49 +617,33 @@ __device__ void scalar_multiply_G_precomputed_large(ECPointJac *result, const Bi
             }
         }
         
-        // Add precomputed point
         if (window > 0) {
-			// Use read-only cache for better performance
-			ECPointJac precomp_point;
-			const ECPointJac* ptr = &d_precomp_G[window];
-			// Load X coordinate through read-only cache
-			#pragma unroll
-			for (int k = 0; k < 8; k++) {
-				precomp_point.X.data[k] = __ldg(&ptr->X.data[k]);
-				precomp_point.Y.data[k] = __ldg(&ptr->Y.data[k]);
-				precomp_point.Z.data[k] = __ldg(&ptr->Z.data[k]);
-			}
-			precomp_point.infinity = ptr->infinity;
-			add_point_jac(&res, &res, &precomp_point);
+            ECPointJac precomp_point;
+            const ECPointJac* ptr = &d_precomp_G[window];
+            #pragma unroll
+            for (int k = 0; k < 8; k++) {
+                precomp_point.X.data[k] = __ldg(&ptr->X.data[k]);
+                precomp_point.Y.data[k] = __ldg(&ptr->Y.data[k]);
+                precomp_point.Z.data[k] = __ldg(&ptr->Z.data[k]);
+            }
+            precomp_point.infinity = ptr->infinity;
+            add_point_jac(&res, &res, &precomp_point);
         }
     }
     
     point_copy_jac(result, &res);
 }
 
-// Cleanup function (call at program end)
-void cleanup_precomputed_table() {
-    ECPointJac *h_precomp_G_ptr;
-    CHECK_CUDA(cudaMemcpyFromSymbol(&h_precomp_G_ptr, d_precomp_G, sizeof(ECPointJac*)));
-    CHECK_CUDA(cudaFree(h_precomp_G_ptr));
-}
-// Main scalar multiplication function that automatically chooses optimal method
 __device__ void scalar_multiply_optimized(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
     if (is_base_point_G(point)) {
-        // Use precomputed table for base point G
         scalar_multiply_G_precomputed_large(result, scalar);
     } else {
-        // Use general method with shared memory
-		printf("manual scalar");
+        printf("manual scalar");
         scalar_multiply_jac_device(result, point, scalar);
     }
 }
 
-#endif
-
-// Host function implementations (should be in a separate .cu file)
-
-// Host-side BigInt and ECPoint operations (simplified versions)
+// Host function implementations
 void host_init_bigint(BigInt *x, uint32_t val) {
     x->data[0] = val;
     for (int i = 1; i < BIGINT_WORDS; i++) x->data[i] = 0;
@@ -595,32 +666,74 @@ void host_point_copy_jac(ECPointJac *dest, const ECPointJac *src) {
     dest->infinity = src->infinity;
 }
 
-// Host-side point addition and doubling (you can use your existing CPU implementations)
-// These are simplified placeholders - replace with your actual host implementations
-void host_add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJac *Q) {
-    // TODO: Implement host-side point addition
-    // This should be equivalent to your device add_point_jac function
-    // but using host-side modular arithmetic
+// Initialize Montgomery constants
+void init_montgomery_constants() {
+    BigInt R2;
+    uint32_t R2_data[8] = {
+        0x00000001, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000003, 0x00000000
+    };
+    memcpy(R2.data, R2_data, sizeof(R2_data));
+    cudaMemcpyToSymbol(mont_R2_mod_p, &R2, sizeof(BigInt));
 }
 
-void host_double_point_jac(ECPointJac *R, const ECPointJac *P) {
-    // TODO: Implement host-side point doubling
-    // This should be equivalent to your device double_point_jac function
-    // but using host-side modular arithmetic
+void init_montgomery_constants_extended() {
+    init_montgomery_constants();
+    
+    BigInt one_mont, two_mont, three_mont, four_mont, eight_mont;
+    
+    // Montgomery form of 1 = R mod p
+    uint32_t one_mont_data[8] = {
+        0x000003D1, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    memcpy(one_mont.data, one_mont_data, sizeof(one_mont_data));
+    
+    // Montgomery form of 2 = 2R mod p
+    uint32_t two_mont_data[8] = {
+        0x000007A2, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    memcpy(two_mont.data, two_mont_data, sizeof(two_mont_data));
+    
+    // Montgomery form of 3 = 3R mod p
+    uint32_t three_mont_data[8] = {
+        0x00000B73, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    memcpy(three_mont.data, three_mont_data, sizeof(three_mont_data));
+    
+    // Montgomery form of 4 = 4R mod p
+    uint32_t four_mont_data[8] = {
+        0x00000F44, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    memcpy(four_mont.data, four_mont_data, sizeof(four_mont_data));
+    
+    // Montgomery form of 8 = 8R mod p
+    uint32_t eight_mont_data[8] = {
+        0x00001E88, 0x00000000, 0x00000000, 0x00000000,
+        0x00000000, 0x00000000, 0x00000000, 0x00000000
+    };
+    memcpy(eight_mont.data, eight_mont_data, sizeof(eight_mont_data));
+    
+    cudaMemcpyToSymbol(const_one_mont, &one_mont, sizeof(BigInt));
+    cudaMemcpyToSymbol(const_two_mont, &two_mont, sizeof(BigInt));
+    cudaMemcpyToSymbol(const_three_mont, &three_mont, sizeof(BigInt));
+    cudaMemcpyToSymbol(const_four_mont, &four_mont, sizeof(BigInt));
+    cudaMemcpyToSymbol(const_eight_mont, &eight_mont, sizeof(BigInt));
 }
 
-// GPU kernel to compute precomputed table
+// GPU kernels for precomputed table
 __global__ void compute_precomputed_table_gpu(ECPointJac *temp_table) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= PRECOMP_SIZE) return;
     
     if (idx == 0) {
-        // table[0] = infinity (0*G)
         point_set_infinity_jac(&temp_table[0]);
         return;
     }
     
-    // Each thread computes idx*G using binary representation
     ECPointJac result, base;
     point_set_infinity_jac(&result);
     point_copy_jac(&base, &const_G_jacobian);
@@ -637,69 +750,55 @@ __global__ void compute_precomputed_table_gpu(ECPointJac *temp_table) {
     point_copy_jac(&temp_table[idx], &result);
 }
 
-// New kernel for batch computation
 __global__ void compute_batch_precomp(ECPointJac *batch, int start_idx, int count) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) return;
     
     if (idx == 0 && start_idx == 2) {
-        // First point in first batch: 2*G = G + G
         add_point_jac(&batch[1], &batch[0], &const_G_jacobian);
     } else if (idx > 0) {
-        // Each subsequent point: (start_idx + idx)*G = (start_idx + idx - 1)*G + G
         add_point_jac(&batch[idx], &batch[idx - 1], &const_G_jacobian);
     }
 }
 
-
-// Alternative: More robust kernel that processes in smaller chunks
 __global__ void compute_batch_precomp_kernel_robust(ECPointJac *table, int start_idx, int end_idx) {
-    // Process in chunks of 64 to avoid timeouts
     const int CHUNK_SIZE = 64;
     
     for (int chunk_start = start_idx; chunk_start < end_idx; chunk_start += CHUNK_SIZE) {
         int chunk_end = min(chunk_start + CHUNK_SIZE, end_idx);
         
-        // Compute this chunk
         for (int i = chunk_start; i < chunk_end; i++) {
             add_point_jac(&table[i], &table[i - 1], &const_G_jacobian);
         }
         
-        // Allow other kernels to run (prevent timeout)
         __syncthreads();
     }
 }
+
 void init_precomputed_table_host() {
     printf("Initializing precomputed table for base point G...\n");
     printf("Table size: %d entries (%.2f MB)\n", PRECOMP_SIZE, 
            (PRECOMP_SIZE * sizeof(ECPointJac)) / (1024.0 * 1024.0));
     
-    // Allocate global memory for the table
     ECPointJac *h_precomp_G_ptr;
     CHECK_CUDA(cudaMalloc(&h_precomp_G_ptr, PRECOMP_SIZE * sizeof(ECPointJac)));
     
-    // Copy the pointer to device symbol
     CHECK_CUDA(cudaMemcpyToSymbol(d_precomp_G, &h_precomp_G_ptr, sizeof(ECPointJac*)));
     
-    // Compute table on GPU using simple sequential approach
     ECPointJac *h_table = (ECPointJac*)malloc(PRECOMP_SIZE * sizeof(ECPointJac));
     
-    // Initialize ALL entries to infinity first (for safety)
     for (int i = 0; i < PRECOMP_SIZE; i++) {
         host_point_set_infinity_jac(&h_table[i]);
     }
     
-    // Set up first two entries
     ECPointJac G_host;
     cudaMemcpyFromSymbol(&G_host, const_G_jacobian, sizeof(ECPointJac));
     host_point_copy_jac(&h_table[1], &G_host);
     
-    // Copy initial entries to GPU
     CHECK_CUDA(cudaMemcpy(h_precomp_G_ptr, h_table, 2 * sizeof(ECPointJac), cudaMemcpyHostToDevice));
     
-    // Compute remaining entries in batches
-    const int BATCH_SIZE = (PRECOMP_SIZE > 16384) ? 256 : 1024;  // Smaller batches for large tables
-    int total_computed = 2;  // Track actual progress
+    const int BATCH_SIZE = (PRECOMP_SIZE > 16384) ? 256 : 1024;
+    int total_computed = 2;
     
     for (int i = 2; i < PRECOMP_SIZE; i += BATCH_SIZE) {
         int batch_end = min(i + BATCH_SIZE, PRECOMP_SIZE);
@@ -707,16 +806,13 @@ void init_precomputed_table_host() {
         
         printf("Processing batch: %d to %d (size: %d)\n", i, batch_end, batch_size);
         
-        // Copy current state to GPU if needed
         if (i > 2) {
             CHECK_CUDA(cudaMemcpy(&h_precomp_G_ptr[i-1], &h_table[i-1], 
                                  sizeof(ECPointJac), cudaMemcpyHostToDevice));
         }
         
-        // Compute batch on GPU
         compute_batch_precomp_kernel_robust<<<1, 1>>>(h_precomp_G_ptr, i, batch_end);
         
-        // Check for errors
         cudaError_t err = cudaGetLastError();
         if (err != cudaSuccess) {
             printf("Kernel launch error: %s\n", cudaGetErrorString(err));
@@ -725,11 +821,9 @@ void init_precomputed_table_host() {
         
         CHECK_CUDA(cudaDeviceSynchronize());
         
-        // Copy results back
         CHECK_CUDA(cudaMemcpy(&h_table[i], &h_precomp_G_ptr[i], 
                              batch_size * sizeof(ECPointJac), cudaMemcpyDeviceToHost));
         
-        // Verify batch was actually computed
         bool batch_valid = true;
         for (int j = i; j < batch_end && batch_valid; j++) {
             if (h_table[j].infinity) {
@@ -746,10 +840,8 @@ void init_precomputed_table_host() {
         
         total_computed = batch_end;
         
-        //if (i % 1024 == 0 || i == 2) {
-            printf("Computed %d entries (%.1f%%)\n", total_computed, 
-                   100.0 * total_computed / PRECOMP_SIZE);
-        //}
+        printf("Computed %d entries (%.1f%%)\n", total_computed, 
+               100.0 * total_computed / PRECOMP_SIZE);
     }
     
     printf("\nActual entries computed: %d out of %d\n", total_computed, PRECOMP_SIZE);
@@ -761,7 +853,6 @@ void init_precomputed_table_host() {
         exit(1);
     }
     
-    // Copy final table to GPU
     CHECK_CUDA(cudaMemcpy(h_precomp_G_ptr, h_table, PRECOMP_SIZE * sizeof(ECPointJac), 
                          cudaMemcpyHostToDevice));
     
@@ -769,9 +860,7 @@ void init_precomputed_table_host() {
     printf("Precomputed table initialized successfully in global memory\n");
 }
 
-// Utility function to initialize secp256k1 constants
 void init_secp256k1_constants() {
-    // secp256k1 prime p = 2^256 - 2^32 - 977
     BigInt p;
     uint32_t p_data[8] = {
         0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF,
@@ -780,7 +869,6 @@ void init_secp256k1_constants() {
     memcpy(p.data, p_data, sizeof(p_data));
     cudaMemcpyToSymbol(const_p, &p, sizeof(BigInt));
     
-    // secp256k1 order n
     BigInt n;
     uint32_t n_data[8] = {
         0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6,
@@ -789,7 +877,6 @@ void init_secp256k1_constants() {
     memcpy(n.data, n_data, sizeof(n_data));
     cudaMemcpyToSymbol(const_n, &n, sizeof(BigInt));
     
-    // secp256k1 base point G in Jacobian coordinates
     ECPointJac G_jac;
     uint32_t Gx_data[8] = {
         0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB,
@@ -809,31 +896,31 @@ void init_secp256k1_constants() {
     printf("secp256k1 constants initialized on GPU\n");
 }
 
-// Complete initialization function to call from main
 void initialize_secp256k1_gpu() {
     printf("Initializing secp256k1 for GPU...\n");
     
-    // Initialize constants first
     init_secp256k1_constants();
-    
-    // Then initialize precomputed table
+    init_montgomery_constants_extended();
     init_precomputed_table_host();
     
     printf("secp256k1 GPU initialization complete!\n");
 }
 
-// Example usage kernel
+void cleanup_precomputed_table() {
+    ECPointJac *h_precomp_G_ptr;
+    CHECK_CUDA(cudaMemcpyFromSymbol(&h_precomp_G_ptr, d_precomp_G, sizeof(ECPointJac*)));
+    CHECK_CUDA(cudaFree(h_precomp_G_ptr));
+}
+
 __global__ void test_scalar_multiplication(ECPoint *results, BigInt *scalars, int count) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= count) return;
     
     ECPointJac result_jac;
-    
-    // Use optimized scalar multiplication (automatically chooses best method)
     scalar_multiply_optimized(&result_jac, &const_G_jacobian, &scalars[idx]);
-    
-    // Convert to affine coordinates for output
     jacobian_to_affine_fast(&results[idx], &result_jac);
 }
+
+#endif // SECP256K1_CUH
 
 //Author telegram: https://t.me/nmn5436
