@@ -532,7 +532,18 @@ __device__ void scalar_multiply_G_precomputed_large(ECPointJac *result, const Bi
         
         // Add precomputed point
         if (window > 0) {
-            add_point_jac(&res, &res, &d_precomp_G[window]);
+			// Use read-only cache for better performance
+			ECPointJac precomp_point;
+			const ECPointJac* ptr = &d_precomp_G[window];
+			// Load X coordinate through read-only cache
+			#pragma unroll
+			for (int k = 0; k < 8; k++) {
+				precomp_point.X.data[k] = __ldg(&ptr->X.data[k]);
+				precomp_point.Y.data[k] = __ldg(&ptr->Y.data[k]);
+				precomp_point.Z.data[k] = __ldg(&ptr->Z.data[k]);
+			}
+			precomp_point.infinity = ptr->infinity;
+			add_point_jac(&res, &res, &precomp_point);
         }
     }
     
