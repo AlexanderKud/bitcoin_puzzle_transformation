@@ -10,18 +10,6 @@
 #pragma once
 #include <stdint.h>
 #include <curand_kernel.h>
-#include "secp256k1.cuh"
-#include <iostream>
-#include <vector>
-#include <string>
-#include <iomanip>
-#include <stdexcept>
-#include <sstream>
-#include <cstdint>
-#include <fstream>
-#pragma once
-#include <stdint.h>
-#include <curand_kernel.h>
 
 // Optimized rotate right for SHA-256
 __device__ inline uint32_t rotr(uint32_t x, uint32_t n) {
@@ -1411,8 +1399,8 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 							}
 							
 							
-							scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-							jacobian_to_affine(&public_key, &result_jac);
+							scalar_multiply_optimized(&result_jac, &const_G_jacobian, &priv);
+							jacobian_to_affine_fast(&public_key, &result_jac);
 							coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
 							hash160(pubkey, 33, hash160_out);
 							
@@ -1478,7 +1466,7 @@ int main(int argc, char* argv[]) {
         cudaSetDevice(device_id);
 
         std::cout << "Using CUDA device " << device_id << std::endl;
-        init_gpu_constants();
+		initialize_secp256k1_gpu();
         
         // Allocate device memory for 3 strings
         char *d_param1, *d_param2, *d_param3;

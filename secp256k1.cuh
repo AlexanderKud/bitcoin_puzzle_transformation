@@ -9,6 +9,10 @@
 
 #define BIGINT_WORDS 8
 
+// Precomputation settings
+#define PRECOMP_BITS 8
+#define PRECOMP_SIZE (1 << PRECOMP_BITS)  // 256 points
+#define WINDOW_SIZE 4  // For general scalar multiplication
 
 #define CHECK_CUDA(call) do { \
     cudaError_t err = call; \
@@ -17,7 +21,6 @@
         exit(EXIT_FAILURE); \
     } \
 } while(0)
-
 
 struct BigInt {
     uint32_t data[BIGINT_WORDS];
@@ -33,11 +36,16 @@ struct ECPointJac {
     bool infinity;
 };
 
-
+// Constants
 __constant__ BigInt const_p;
 __constant__ ECPointJac const_G_jacobian;
 __constant__ BigInt const_n;
 
+// Precomputed table for base point G
+__device__ ECPointJac *d_precomp_G = nullptr;
+
+// Host function to initialize precomputed table
+void init_precomputed_table_host();
 
 __host__ __device__ __forceinline__ void init_bigint(BigInt *x, uint32_t val) {
     x->data[0] = val;
@@ -90,6 +98,7 @@ __device__ __forceinline__ void ptx_u256Add(BigInt *res, const BigInt *a, const 
           "r"(b->data[4]), "r"(b->data[5]), "r"(b->data[6]), "r"(b->data[7])
     );
 }
+
 __device__ __forceinline__ void ptx_u256Sub(BigInt *res, const BigInt *a, const BigInt *b) {
     asm volatile(
         "sub.cc.u32 %0, %8, %16;\n\t"
@@ -108,6 +117,7 @@ __device__ __forceinline__ void ptx_u256Sub(BigInt *res, const BigInt *a, const 
           "r"(b->data[4]), "r"(b->data[5]), "r"(b->data[6]), "r"(b->data[7])
     );
 }
+
 // Optimized multiply_bigint_by_const with unrolling
 __device__ __forceinline__ void multiply_bigint_by_const(const BigInt *a, uint32_t c, uint32_t result[9]) {
     uint64_t carry = 0;
@@ -148,6 +158,7 @@ __device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], Big
         res->data[i] = r[i];
     }
 }
+
 __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
     uint32_t prod[16] = {0};
     
@@ -259,6 +270,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     
     copy_bigint(res, &R_temp);
 }
+
 __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
     BigInt temp;
     if (compare_bigint(a, b) < 0) {
@@ -271,83 +283,47 @@ __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, con
     copy_bigint(res, &temp);
 }
 
-__device__ __forceinline__ void scalar_mod_n(BigInt *res, const BigInt *a) {
-    if (compare_bigint(a, &const_n) >= 0) {
-        // a >= n, 做一次减法
-        ptx_u256Sub(res, a, &const_n);
-    } else {
-        copy_bigint(res, a);
+// MOST CRITICAL SPEED FIX: Replace bit-by-bit modexp with optimized version
+// This fixes the infinite loop issue while still providing major speedup
+__device__ void mod_inverse_fast(BigInt *res, const BigInt *a) {
+    BigInt R0, R1;
+    init_bigint(&R0, 1);
+    copy_bigint(&R1, a);
+    
+    // Process from MSB (bit 255) to LSB (bit 0)
+    // p-2 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2D
+    
+    // Handle bits 255-33 (all are 1s in p-2)
+    #pragma unroll
+    for (int i = 255; i >= 33; i--) {
+        // bit = 1, so always:
+        mul_mod_device(&R0, &R0, &R1);    // R0 = R0 * R1
+        mul_mod_device(&R1, &R1, &R1);    // R1 = R1^2
     }
-}
-
-__device__ __forceinline__ void add_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
-    uint32_t carry;
     
-    // Use PTX for addition with carry flag
-    asm volatile(
-        "add.cc.u32 %0, %9, %17;\n\t"
-        "addc.cc.u32 %1, %10, %18;\n\t"
-        "addc.cc.u32 %2, %11, %19;\n\t"
-        "addc.cc.u32 %3, %12, %20;\n\t"
-        "addc.cc.u32 %4, %13, %21;\n\t"
-        "addc.cc.u32 %5, %14, %22;\n\t"
-        "addc.cc.u32 %6, %15, %23;\n\t"
-        "addc.cc.u32 %7, %16, %24;\n\t"
-        "addc.u32 %8, 0, 0;\n\t"  // capture final carry
-        : "=r"(res->data[0]), "=r"(res->data[1]), "=r"(res->data[2]), "=r"(res->data[3]),
-          "=r"(res->data[4]), "=r"(res->data[5]), "=r"(res->data[6]), "=r"(res->data[7]),
-          "=r"(carry)
-        : "r"(a->data[0]), "r"(a->data[1]), "r"(a->data[2]), "r"(a->data[3]),
-          "r"(a->data[4]), "r"(a->data[5]), "r"(a->data[6]), "r"(a->data[7]),
-          "r"(b->data[0]), "r"(b->data[1]), "r"(b->data[2]), "r"(b->data[3]),
-          "r"(b->data[4]), "r"(b->data[5]), "r"(b->data[6]), "r"(b->data[7])
-    );
+    // Handle bit 32 (which is 0 in p-2)
+    mul_mod_device(&R1, &R0, &R1);       // R1 = R0 * R1
+    mul_mod_device(&R0, &R0, &R0);       // R0 = R0^2
     
-    if (carry || compare_bigint(res, &const_p) >= 0) {
-        ptx_u256Sub(res, res, &const_p);
-    }
-}
-
-__device__ void modexp(BigInt *res, const BigInt *base, const BigInt *exp) {
-    BigInt result;
-    init_bigint(&result, 1);
-    BigInt b;
-    copy_bigint(&b, base);
-    for (int i = 0; i < 256; i++) {
-         if (get_bit(exp, i)) {
-              mul_mod_device(&result, &result, &b);
-         }
-         mul_mod_device(&b, &b, &b);
-    }
-    copy_bigint(res, &result);
-}
-
-
-__device__ void mod_inverse(BigInt *res, const BigInt *a) {
-    BigInt p_minus_2, two;
-    init_bigint(&two, 2);
-    ptx_u256Sub(&p_minus_2, &const_p, &two);
+    // Handle bits 31-0 with the correct pattern
+    // The low 32 bits of p-2 are 0xFFFFFC2D
+    // We need to process from bit 31 down to bit 0
     
-    BigInt result;
-    init_bigint(&result, 1);
-    BigInt b;
-    copy_bigint(&b, a);
-    
-    // Your working version but with better loop unrolling
-    // Process 8 bits at a time for better performance
-    for (int i = 0; i < 256; i += 8) {
-        // Process 8 bits
-        for (int j = 0; j < 8; j++) {
-            if (i + j < 256 && get_bit(&p_minus_2, i + j)) {
-                mul_mod_device(&result, &result, &b);
-            }
-            mul_mod_device(&b, &b, &b);
+    #pragma unroll 32
+    for (int i = 31; i >= 0; i--) {
+        uint32_t bit = (0xFFFFFC2D >> i) & 1;
+        
+        if (bit == 1) {
+            mul_mod_device(&R0, &R0, &R1);    // R0 = R0 * R1
+            mul_mod_device(&R1, &R1, &R1);    // R1 = R1^2
+        } else {
+            mul_mod_device(&R1, &R0, &R1);    // R1 = R0 * R1
+            mul_mod_device(&R0, &R0, &R0);    // R0 = R0^2
         }
     }
     
-    copy_bigint(res, &result);
+    copy_bigint(res, &R0);
 }
-
 
 __device__ __forceinline__ void point_set_infinity_jac(ECPointJac *P) {
     P->infinity = true;
@@ -443,7 +419,8 @@ __device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJ
     R->infinity = false;
 }
 
-__device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
+
+__device__ void jacobian_to_affine_fast(ECPoint *R, const ECPointJac *P) {
     if (P->infinity) {
         R->infinity = true;
         init_bigint(&R->x, 0);
@@ -451,7 +428,7 @@ __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
         return;
     }
     BigInt Zinv, Zinv2, Zinv3;
-    mod_inverse(&Zinv, &P->Z);
+    mod_inverse_fast(&Zinv, &P->Z);  // <-- Use fast inverse here
     mul_mod_device(&Zinv2, &Zinv, &Zinv);
     mul_mod_device(&Zinv3, &Zinv2, &Zinv);
     mul_mod_device(&R->x, &P->X, &Zinv2);
@@ -460,19 +437,20 @@ __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
 }
 
 
+// General scalar multiplication for arbitrary points (using shared memory)
 __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
-    const int WINDOW_SIZE = 4;
-    const int PRECOMP_SIZE = 1 << WINDOW_SIZE;
+    const int SHARED_WINDOW_SIZE = 4;
+    const int SHARED_PRECOMP_SIZE = 1 << SHARED_WINDOW_SIZE;
     
     // Use shared memory for precomputed points
-    __shared__ ECPointJac shared_precomp[1 << WINDOW_SIZE];
+    __shared__ ECPointJac shared_precomp[1 << SHARED_WINDOW_SIZE];
     
     // Collaborative precomputation using threads in the block
     int tid = threadIdx.x;
     int block_size = blockDim.x;
     
     // Each thread computes some precomputed points
-    for (int i = tid; i < PRECOMP_SIZE; i += block_size) {
+    for (int i = tid; i < SHARED_PRECOMP_SIZE; i += block_size) {
         if (i == 0) {
             point_set_infinity_jac(&shared_precomp[0]);
         } else if (i == 1) {
@@ -500,14 +478,13 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
     ECPointJac res;
     point_set_infinity_jac(&res);
     
-    // Process scalar in windows of WINDOW_SIZE bits
+    // Process scalar in windows of SHARED_WINDOW_SIZE bits
     int i = highest_bit;
     while (i >= 0) {
         // Determine window size for this iteration
-        int window_bits = (i >= WINDOW_SIZE - 1) ? WINDOW_SIZE : (i + 1);
+        int window_bits = (i >= SHARED_WINDOW_SIZE - 1) ? SHARED_WINDOW_SIZE : (i + 1);
         
         // Double 'window_bits' times
-        #pragma unroll
         for (int j = 0; j < window_bits; j++) {
             double_point_jac(&res, &res);
         }
@@ -530,6 +507,329 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
     
     point_copy_jac(result, &res);
 }
+
+// Helper function to check if a point equals the base point G
+__device__ bool is_base_point_G(const ECPointJac *point) {
+    return (compare_bigint(&point->X, &const_G_jacobian.X) == 0 &&
+            compare_bigint(&point->Y, &const_G_jacobian.Y) == 0 &&
+            compare_bigint(&point->Z, &const_G_jacobian.Z) == 0 &&
+            point->infinity == const_G_jacobian.infinity);
+}
+
+// Modified scalar multiplication to use global memory
+__device__ void scalar_multiply_G_precomputed_large(ECPointJac *result, const BigInt *scalar) {
+    ECPointJac res;
+    point_set_infinity_jac(&res);
+    
+    // Process from highest bit to lowest in PRECOMP_BITS chunks
+    for (int i = 256 - PRECOMP_BITS; i >= 0; i -= PRECOMP_BITS) {
+        // Double for the window size
+        for (int j = 0; j < PRECOMP_BITS; j++) {
+            double_point_jac(&res, &res);
+        }
+        
+        // Extract window value correctly (big-endian style)
+        uint32_t window = 0;
+        for (int j = PRECOMP_BITS - 1; j >= 0; j--) {
+            window <<= 1;
+            if (i + j < 256 && get_bit(scalar, i + j)) {
+                window |= 1;
+            }
+        }
+        
+        // Add precomputed point
+        if (window > 0) {
+            add_point_jac(&res, &res, &d_precomp_G[window]);
+        }
+    }
+    
+    point_copy_jac(result, &res);
+}
+
+// Cleanup function (call at program end)
+void cleanup_precomputed_table() {
+    ECPointJac *h_precomp_G_ptr;
+    CHECK_CUDA(cudaMemcpyFromSymbol(&h_precomp_G_ptr, d_precomp_G, sizeof(ECPointJac*)));
+    CHECK_CUDA(cudaFree(h_precomp_G_ptr));
+}
+// Main scalar multiplication function that automatically chooses optimal method
+__device__ void scalar_multiply_optimized(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
+    if (is_base_point_G(point)) {
+        // Use precomputed table for base point G
+        scalar_multiply_G_precomputed_large(result, scalar);
+    } else {
+        // Use general method with shared memory
+        scalar_multiply_jac_device(result, point, scalar);
+    }
+}
+
 #endif
+
+// Host function implementations (should be in a separate .cu file)
+
+// Host-side BigInt and ECPoint operations (simplified versions)
+void host_init_bigint(BigInt *x, uint32_t val) {
+    x->data[0] = val;
+    for (int i = 1; i < BIGINT_WORDS; i++) x->data[i] = 0;
+}
+
+void host_copy_bigint(BigInt *dest, const BigInt *src) {
+    for (int i = 0; i < BIGINT_WORDS; i++) {
+        dest->data[i] = src->data[i];
+    }
+}
+
+void host_point_set_infinity_jac(ECPointJac *P) {
+    P->infinity = true;
+}
+
+void host_point_copy_jac(ECPointJac *dest, const ECPointJac *src) {
+    host_copy_bigint(&dest->X, &src->X);
+    host_copy_bigint(&dest->Y, &src->Y);
+    host_copy_bigint(&dest->Z, &src->Z);
+    dest->infinity = src->infinity;
+}
+
+// Host-side point addition and doubling (you can use your existing CPU implementations)
+// These are simplified placeholders - replace with your actual host implementations
+void host_add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJac *Q) {
+    // TODO: Implement host-side point addition
+    // This should be equivalent to your device add_point_jac function
+    // but using host-side modular arithmetic
+}
+
+void host_double_point_jac(ECPointJac *R, const ECPointJac *P) {
+    // TODO: Implement host-side point doubling
+    // This should be equivalent to your device double_point_jac function
+    // but using host-side modular arithmetic
+}
+
+// GPU kernel to compute precomputed table
+__global__ void compute_precomputed_table_gpu(ECPointJac *temp_table) {
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if (idx >= PRECOMP_SIZE) return;
+    
+    if (idx == 0) {
+        // table[0] = infinity (0*G)
+        point_set_infinity_jac(&temp_table[0]);
+    } else if (idx == 1) {
+        // table[1] = G (1*G)
+        point_copy_jac(&temp_table[1], &const_G_jacobian);
+    }
+    
+    // Synchronize to ensure table[0] and table[1] are ready
+    __syncthreads();
+    
+    // Sequential computation of remaining points
+    // Only thread 0 does this to avoid race conditions
+    if (idx == 0) {
+        for (int i = 2; i < PRECOMP_SIZE; i++) {
+            add_point_jac(&temp_table[i], &temp_table[i-1], &const_G_jacobian);
+            
+            if (i % 32 == 0) {
+                printf("GPU computed %d*G\n", i);
+            }
+        }
+    }
+}
+
+// New kernel for batch computation
+__global__ void compute_batch_precomp(ECPointJac *batch, int start_idx, int count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    
+    if (idx == 0 && start_idx == 2) {
+        // First point in first batch: 2*G = G + G
+        add_point_jac(&batch[1], &batch[0], &const_G_jacobian);
+    } else if (idx > 0) {
+        // Each subsequent point: (start_idx + idx)*G = (start_idx + idx - 1)*G + G
+        add_point_jac(&batch[idx], &batch[idx - 1], &const_G_jacobian);
+    }
+}
+
+
+// Alternative: More robust kernel that processes in smaller chunks
+__global__ void compute_batch_precomp_kernel_robust(ECPointJac *table, int start_idx, int end_idx) {
+    // Process in chunks of 64 to avoid timeouts
+    const int CHUNK_SIZE = 64;
+    
+    for (int chunk_start = start_idx; chunk_start < end_idx; chunk_start += CHUNK_SIZE) {
+        int chunk_end = min(chunk_start + CHUNK_SIZE, end_idx);
+        
+        // Compute this chunk
+        for (int i = chunk_start; i < chunk_end; i++) {
+            add_point_jac(&table[i], &table[i - 1], &const_G_jacobian);
+        }
+        
+        // Allow other kernels to run (prevent timeout)
+        __syncthreads();
+    }
+}
+void init_precomputed_table_host() {
+    printf("Initializing precomputed table for base point G...\n");
+    printf("Table size: %d entries (%.2f MB)\n", PRECOMP_SIZE, 
+           (PRECOMP_SIZE * sizeof(ECPointJac)) / (1024.0 * 1024.0));
+    
+    // Allocate global memory for the table
+    ECPointJac *h_precomp_G_ptr;
+    CHECK_CUDA(cudaMalloc(&h_precomp_G_ptr, PRECOMP_SIZE * sizeof(ECPointJac)));
+    
+    // Copy the pointer to device symbol
+    CHECK_CUDA(cudaMemcpyToSymbol(d_precomp_G, &h_precomp_G_ptr, sizeof(ECPointJac*)));
+    
+    // Compute table on GPU using simple sequential approach
+    ECPointJac *h_table = (ECPointJac*)malloc(PRECOMP_SIZE * sizeof(ECPointJac));
+    
+    // Initialize ALL entries to infinity first (for safety)
+    for (int i = 0; i < PRECOMP_SIZE; i++) {
+        host_point_set_infinity_jac(&h_table[i]);
+    }
+    
+    // Set up first two entries
+    ECPointJac G_host;
+    cudaMemcpyFromSymbol(&G_host, const_G_jacobian, sizeof(ECPointJac));
+    host_point_copy_jac(&h_table[1], &G_host);
+    
+    // Copy initial entries to GPU
+    CHECK_CUDA(cudaMemcpy(h_precomp_G_ptr, h_table, 2 * sizeof(ECPointJac), cudaMemcpyHostToDevice));
+    
+    // Compute remaining entries in batches
+    const int BATCH_SIZE = (PRECOMP_SIZE > 16384) ? 256 : 1024;  // Smaller batches for large tables
+    int total_computed = 2;  // Track actual progress
+    
+    for (int i = 2; i < PRECOMP_SIZE; i += BATCH_SIZE) {
+        int batch_end = min(i + BATCH_SIZE, PRECOMP_SIZE);
+        int batch_size = batch_end - i;
+        
+        printf("Processing batch: %d to %d (size: %d)\n", i, batch_end, batch_size);
+        
+        // Copy current state to GPU if needed
+        if (i > 2) {
+            CHECK_CUDA(cudaMemcpy(&h_precomp_G_ptr[i-1], &h_table[i-1], 
+                                 sizeof(ECPointJac), cudaMemcpyHostToDevice));
+        }
+        
+        // Compute batch on GPU
+        compute_batch_precomp_kernel_robust<<<1, 1>>>(h_precomp_G_ptr, i, batch_end);
+        
+        // Check for errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            printf("Kernel launch error: %s\n", cudaGetErrorString(err));
+            exit(1);
+        }
+        
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        // Copy results back
+        CHECK_CUDA(cudaMemcpy(&h_table[i], &h_precomp_G_ptr[i], 
+                             batch_size * sizeof(ECPointJac), cudaMemcpyDeviceToHost));
+        
+        // Verify batch was actually computed
+        bool batch_valid = true;
+        for (int j = i; j < batch_end && batch_valid; j++) {
+            if (h_table[j].infinity) {
+                printf("ERROR: Entry %d is still infinity after computation!\n", j);
+                batch_valid = false;
+            }
+        }
+        
+        if (!batch_valid) {
+            printf("Batch computation failed at entry %d\n", i);
+            total_computed = i;
+            break;
+        }
+        
+        total_computed = batch_end;
+        
+        //if (i % 1024 == 0 || i == 2) {
+            printf("Computed %d entries (%.1f%%)\n", total_computed, 
+                   100.0 * total_computed / PRECOMP_SIZE);
+        //}
+    }
+    
+    printf("\nActual entries computed: %d out of %d\n", total_computed, PRECOMP_SIZE);
+    
+    if (total_computed < PRECOMP_SIZE) {
+        printf("ERROR: Table incomplete! Only computed %d entries (%.1f%%)\n", 
+               total_computed, 100.0 * total_computed / PRECOMP_SIZE);
+        printf("Reducing PRECOMP_BITS is recommended.\n");
+        exit(1);
+    }
+    
+    // Copy final table to GPU
+    CHECK_CUDA(cudaMemcpy(h_precomp_G_ptr, h_table, PRECOMP_SIZE * sizeof(ECPointJac), 
+                         cudaMemcpyHostToDevice));
+    
+    free(h_table);
+    printf("Precomputed table initialized successfully in global memory\n");
+}
+
+// Utility function to initialize secp256k1 constants
+void init_secp256k1_constants() {
+    // secp256k1 prime p = 2^256 - 2^32 - 977
+    BigInt p;
+    uint32_t p_data[8] = {
+        0xFFFFFC2F, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF,
+        0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    };
+    memcpy(p.data, p_data, sizeof(p_data));
+    cudaMemcpyToSymbol(const_p, &p, sizeof(BigInt));
+    
+    // secp256k1 order n
+    BigInt n;
+    uint32_t n_data[8] = {
+        0xD0364141, 0xBFD25E8C, 0xAF48A03B, 0xBAAEDCE6,
+        0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF
+    };
+    memcpy(n.data, n_data, sizeof(n_data));
+    cudaMemcpyToSymbol(const_n, &n, sizeof(BigInt));
+    
+    // secp256k1 base point G in Jacobian coordinates
+    ECPointJac G_jac;
+    uint32_t Gx_data[8] = {
+        0x16F81798, 0x59F2815B, 0x2DCE28D9, 0x029BFCDB,
+        0xCE870B07, 0x55A06295, 0xF9DCBBAC, 0x79BE667E
+    };
+    uint32_t Gy_data[8] = {
+        0xFB10D4B8, 0x9C47D08F, 0xA6855419, 0xFD17B448,
+        0x0E1108A8, 0x5DA4FBFC, 0x26A3C465, 0x483ADA77
+    };
+    memcpy(G_jac.X.data, Gx_data, sizeof(Gx_data));
+    memcpy(G_jac.Y.data, Gy_data, sizeof(Gy_data));
+    host_init_bigint(&G_jac.Z, 1);
+    G_jac.infinity = false;
+    
+    cudaMemcpyToSymbol(const_G_jacobian, &G_jac, sizeof(ECPointJac));
+    
+    printf("secp256k1 constants initialized on GPU\n");
+}
+
+// Complete initialization function to call from main
+void initialize_secp256k1_gpu() {
+    printf("Initializing secp256k1 for GPU...\n");
+    
+    // Initialize constants first
+    init_secp256k1_constants();
+    
+    // Then initialize precomputed table
+    init_precomputed_table_host();
+    
+    printf("secp256k1 GPU initialization complete!\n");
+}
+
+// Example usage kernel
+__global__ void test_scalar_multiplication(ECPoint *results, BigInt *scalars, int count) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    
+    ECPointJac result_jac;
+    
+    // Use optimized scalar multiplication (automatically chooses best method)
+    scalar_multiply_optimized(&result_jac, &const_G_jacobian, &scalars[idx]);
+    
+    // Convert to affine coordinates for output
+    jacobian_to_affine_fast(&results[idx], &result_jac);
+}
 
 //Author telegram: https://t.me/nmn5436
