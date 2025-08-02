@@ -1268,13 +1268,11 @@ __device__ __forceinline__ bool compare_hash160_fast(const uint8_t* hash1, const
     return true;
 }
 
-// Warp-level synchronization for better performance
 __device__ __forceinline__ void warp_sync() {
     __syncwarp();
 }
 
-__global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
-    // Initialize shared memory cooperatively
+__global__ void start(const char* minRangePure, const char* maxRangePure, const char* target) {
     if (threadIdx.x < 20) {
         uint8_t val = 0;
         if (threadIdx.x * 2 < 40) {
@@ -1290,7 +1288,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     }
     __syncthreads();
     
-    // Print info only once
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         printf("min: %s\n", minRangePure);
         printf("max: %s\n", maxRangePure);
@@ -1301,7 +1298,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     int total_threads = gridDim.x * blockDim.x;
     int length = (str_len(minRangePure) - 1) * 4;
     
-    // Pre-allocate all working variables in registers
     char minRange[65], maxRange[65];
     leftPad64(minRange, minRangePure);
     leftPad64(maxRange, maxRangePure);
@@ -1310,23 +1306,19 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     hex_to_bigint(minRange, &min);
     hex_to_bigint(maxRange, &max);
     
-    // Use texture memory for constant data if available
     const ECPointJac G_cached = const_G_jacobian;
     
-    // Thread-local variables
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
     uint8_t hash160_out[20];
     char hex[65];
     
-    // Enhanced RNG initialization
     uint64_t seed = clock64();
     seed ^= ((uint64_t)tid << 32) | ((uint64_t)blockIdx.x << 16) | threadIdx.x;
     seed = mix(seed);
     seed ^= ((uint64_t)gridDim.x << 48) | ((uint64_t)blockDim.x << 32);
     
-    // Use multiple RNG states for better randomness
     uint64_t rng_state = mix(seed);
     uint64_t rng_state2 = mix(seed ^ 0xDEADBEEF12345678ULL);
     uint64_t rng_state3 = mix(seed ^ 0x123456789ABCDEF0ULL);
@@ -1336,58 +1328,33 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     unsigned long long last_report_keys = 0;
     clock_t start_time = clock64();
     clock_t last_report_time = start_time;
-    
-    // Main loop with optimizations
+	
+	char binary[257];
     while (shared_found == 0 && g_found == 0) {
-        // Generate random value with triple RNG mixing
         generate_random_bigint_range_optimized(&rng_state, &min, &max, &random_value);
-		char binary[257]; // 256 bits + null terminator
 		bigint_to_binary(&random_value, binary);
-        
-        
-        // Process variations with aggressive unrolling
-        #pragma unroll 2
+
         for (int inv = 0; inv < 2; inv++) {
-            if (shared_found) break;
-            
-            #pragma unroll 2
             for (int z = 0; z < 2; z++) {
-                if (shared_found) break;
-                
-                // Process length variations
                 for (int y = 0; y < length; y++) {
-                    if (shared_found) break;
-                    
-                    // Process 16 hex rotations with maximum unrolling
-                    #pragma unroll 16
                     for (int x = 0; x < 16; x++) {
-                        // Direct hex to bigint conversion
-						char temp_hex[65];
-						binary_to_hex(binary, temp_hex);
-						hex_to_bigint(temp_hex, &priv);
-                        
-                        // Optimized scalar multiplication
+						
+                        binary_to_bigint(binary, &priv);
+						
                         scalar_multiply_optimized(&result_jac, &G_cached, &priv);
                         jacobian_to_affine_fast(&public_key, &result_jac);
-                        
-                        // Generate compressed public key
                         coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
                         
-                        // Compute hash160
                         hash160(pubkey, 33, hash160_out);
                         
                         local_keys_checked++;
                         
-                        // Fast comparison using shared memory target
                         if (compare_hash160_fast(hash160_out, shared_target)) {
-                            // Try to claim the found flag
                             if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-                                // Convert results
 								binary_to_hex(binary, hex);
                                 char hash160_str[41];
                                 hash160_to_hex(hash160_out, hash160_str);
                                 
-                                // Copy to global memory
                                 memcpy(g_found_hex, hex, d_strlen(hex) + 1);
                                 memcpy(g_found_hash160, hash160_str, 41);
                                 
@@ -1400,26 +1367,17 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                             shared_found = 1;
                             break;
                         }
-                        
-                        // Rotate hex for next iteration
                         binary_vertical_rotate_up(binary);
                     }
-                    
-                    // Move to next position
                     binary_rotate_left_by_one(binary);
                 }
-                
-                // Apply transformation
                 reverseBinaryAfterFirst1(binary);
             }
-            
-            // Apply inversion
             invertBinaryAfterFirst1(binary);
         }
         
         c++;
         
-        // Performance reporting with reduced overhead
         if (tid == 0 && c % 1 == 0) {
             clock_t current_time = clock64();
             double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0;
@@ -1439,23 +1397,13 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                 last_report_time = current_time;
             }
         }
-        
-        // Advanced reseeding strategy
-        if ((c & 0x3FFFF) == 0) {  // Every ~262k iterations
-            uint64_t new_entropy = clock64() ^ ((uint64_t)c << 32);
-            rng_state = mix(rng_state ^ new_entropy);
-            rng_state2 = mix(rng_state2 ^ (new_entropy << 1));
-            rng_state3 = mix(rng_state3 ^ (new_entropy >> 1));
-        }
     }
     
-    // Final counter update
     if (local_keys_checked > last_report_keys) {
         atomicAdd((unsigned long long*)&g_total_keys, local_keys_checked - last_report_keys);
     }
 }
 
-// Optimized main function with better GPU configuration
 int main(int argc, char* argv[]) {
     if (argc < 4) {
         std::cerr << "Usage: " << argv[0] << " <min> <max> <target> [blocks] [threads] [device_id]" << std::endl;
@@ -1513,10 +1461,10 @@ int main(int argc, char* argv[]) {
         printf("Total parallel threads: %d\n\n", blocks * threads);
         
         // Set cache configuration for better performance
-        cudaFuncSetCacheConfig(start_optimized, cudaFuncCachePreferL1);
+        cudaFuncSetCacheConfig(start, cudaFuncCachePreferL1);
         
         // Launch kernel
-        start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
+        start<<<blocks, threads>>>(d_param1, d_param2, d_param3);
         
         // Wait for completion
         cudaDeviceSynchronize();
