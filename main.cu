@@ -1272,103 +1272,6 @@ __device__ __forceinline__ void warp_sync() {
     __syncwarp();
 }
 
-
-
-__device__ void binary_fibonacci_shift(char* binary, int shift) {
-    int len = d_strlen(binary);
-    int fib1 = 1, fib2 = 1, fib_next;
-    
-    // Apply Fibonacci sequence based bit shifts
-    for (int i = 0; i < len - 1; i += fib2) {
-        if (i + shift < len) {
-            char temp = binary[i];
-            binary[i] = binary[i + shift];
-            binary[i + shift] = temp;
-        }
-        
-        fib_next = fib1 + fib2;
-        fib1 = fib2;
-        fib2 = fib_next;
-        if (fib2 > len) fib2 = 1;  // Reset if too large
-    }
-}
-
-__device__ void binary_prime_shift(char* binary, int shift) {
-    int len = d_strlen(binary);
-    int primes[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31};
-    int prime_count = 11;
-    
-    // Apply prime number based transformations
-    for (int p = 0; p < prime_count && primes[p] < len; p++) {
-        int prime = primes[p];
-        for (int i = prime - 1; i < len; i += prime) {
-            if (i + shift < len) {
-                binary[i] = (binary[i] == '0') ? '1' : '0';  // Flip bit
-            }
-        }
-    }
-}
-
-__device__ void binary_zigzag_transform(char* binary, int amplitude) {
-    int len = d_strlen(binary);
-    
-    // Create zigzag pattern transformation
-    for (int i = 0; i < len - amplitude; i++) {
-        int offset = (i % (amplitude * 2) < amplitude) ? amplitude : -amplitude;
-        int target = i + offset;
-        
-        if (target >= 0 && target < len) {
-            char temp = binary[i];
-            binary[i] = binary[target];
-            binary[target] = temp;
-        }
-    }
-}
-
-__device__ void binary_block_swap(char* binary, int block_size) {
-    int len = d_strlen(binary);
-    block_size = (block_size % 16) + 1;  // 1-16 block sizes
-    
-    // Swap blocks of bits
-    for (int i = 0; i < len - 2 * block_size; i += 2 * block_size) {
-        // Swap block at position i with block at position i + block_size
-        for (int j = 0; j < block_size && i + j + block_size < len; j++) {
-            char temp = binary[i + j];
-            binary[i + j] = binary[i + j + block_size];
-            binary[i + j + block_size] = temp;
-        }
-    }
-}
-
-// NEW: Additional transformation function - Spiral shift pattern
-__device__ void binary_spiral_shift(char* binary, int step) {
-    int len = d_strlen(binary);
-    if (len <= 1) return;
-    
-    // Create a spiral pattern shift based on step parameter
-    int shift_amount = (step % 8) + 1;  // 1-8 bit shifts
-    
-    // Perform different transformations based on step
-    switch (step % 4) {
-        case 0:
-            // Fibonacci-like shift pattern
-            binary_fibonacci_shift(binary, shift_amount);
-            break;
-        case 1:
-            // Prime number pattern shift
-            binary_prime_shift(binary, shift_amount);
-            break;
-        case 2:
-            // Zigzag pattern
-            binary_zigzag_transform(binary, shift_amount);
-            break;
-        case 3:
-            // Block swap pattern
-            binary_block_swap(binary, shift_amount);
-            break;
-    }
-}
-
 __global__ void start(const char* minRangePure, const char* maxRangePure, const char* target) {
     if (threadIdx.x < 20) {
         uint8_t val = 0;
@@ -1435,50 +1338,41 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
             for (int z = 0; z < 2; z++) {
                 for (int y = 0; y < length; y++) {
                     for (int x = 0; x < 16; x++) {
-                        for (int w = 0; w < 8; w++) {  // NEW: Additional transformation layer
 						
-                            binary_to_bigint(binary, &priv);
+                        binary_to_bigint(binary, &priv);
 						
-                            scalar_multiply_optimized(&result_jac, &G_cached, &priv);
-                            jacobian_to_affine_fast(&public_key, &result_jac);
-                            coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-                            
-                            hash160(pubkey, 33, hash160_out);
-                            
-                            local_keys_checked++;
-                            
-                            if (compare_hash160_fast(hash160_out, shared_target)) {
-                                if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-								    binary_to_hex(binary, hex);
-                                    char hash160_str[41];
-                                    hash160_to_hex(hash160_out, hash160_str);
-                                    
-                                    memcpy(g_found_hex, hex, d_strlen(hex) + 1);
-                                    memcpy(g_found_hash160, hash160_str, 41);
-                                    
-                                    printf("\n*** FOUND! ***\n");
-                                    printf("Private Key: %s\n", hex);
-                                    printf("Hash160: %s\n", hash160_str);
-                                    printf("Total keys checked: %.2f billion\n", 
-                                           (g_total_keys + local_keys_checked) / 1000000000.0);
-                                }
-                                shared_found = 1;
-                                break;
+                        scalar_multiply_optimized(&result_jac, &G_cached, &priv);
+                        jacobian_to_affine_fast(&public_key, &result_jac);
+                        coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+                        
+                        hash160(pubkey, 33, hash160_out);
+                        
+                        local_keys_checked++;
+                        
+                        if (compare_hash160_fast(hash160_out, shared_target)) {
+                            if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+								binary_to_hex(binary, hex);
+                                char hash160_str[41];
+                                hash160_to_hex(hash160_out, hash160_str);
+                                
+                                memcpy(g_found_hex, hex, d_strlen(hex) + 1);
+                                memcpy(g_found_hash160, hash160_str, 41);
+                                
+                                printf("\n*** FOUND! ***\n");
+                                printf("Private Key: %s\n", hex);
+                                printf("Hash160: %s\n", hash160_str);
+                                printf("Total keys checked: %.2f billion\n", 
+                                       (g_total_keys + local_keys_checked) / 1000000000.0);
                             }
-                            
-                            // NEW: Additional bit manipulation transformations
-                            binary_spiral_shift(binary, w);  // Spiral shift pattern
+                            shared_found = 1;
+                            break;
                         }
-                        if (shared_found) break;
                         binary_vertical_rotate_up(binary);
                     }
-                    if (shared_found) break;
                     binary_rotate_left_by_one(binary);
                 }
-                if (shared_found) break;
                 reverseBinaryAfterFirst1(binary);
             }
-            if (shared_found) break;
             invertBinaryAfterFirst1(binary);
         }
         
