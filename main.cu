@@ -787,6 +787,50 @@ __device__ __forceinline__ uint64_t mix(uint64_t x) {
     x ^= x >> 31;
     return x;
 }
+
+__device__ void generate_random_hex_after_first1(char* outHex, const char* minHex, const char* maxHex, uint64_t* rng_state) {
+    // Start with all '0's
+    for (int i = 0; i < 64; i++) {
+        outHex[i] = '0';
+    }
+    outHex[64] = '\0';
+
+    // Find the first '1' in minHex
+    int prefix_index = -1;
+    for (int i = 0; i < 64; i++) {
+        if (minHex[i] == '1') {
+            prefix_index = i;
+            break;
+        }
+    }
+
+    if (prefix_index == -1) {
+        // fallback: if no '1' found, use full-range
+        prefix_index = 0;
+    }
+
+    // Generate each char from that prefix_index
+    for (int i = prefix_index; i < 64; i++) {
+        char min_c = minHex[i];
+        char max_c = maxHex[i];
+
+        int min_val = (min_c >= 'a') ? (min_c - 'a' + 10) :
+                      (min_c >= 'A') ? (min_c - 'A' + 10) : (min_c - '0');
+        int max_val = (max_c >= 'a') ? (max_c - 'a' + 10) :
+                      (max_c >= 'A') ? (max_c - 'A' + 10) : (max_c - '0');
+
+        // Clamp values
+        min_val = max(0, min_val);
+        max_val = min(15, max(max_val, min_val));
+        int range = max_val - min_val + 1;
+
+        int rand_val = (mix(*rng_state) & 0xFFFFFFFF) % range + min_val;
+        *rng_state = mix(*rng_state);
+
+        outHex[i] = (rand_val < 10) ? ('0' + rand_val) : ('a' + rand_val - 10);
+    }
+}
+
 __device__ volatile int g_found = 0;
 __device__ char g_found_hex[65] = {0};        // Original hex
 __device__ char g_found_hash160[41] = {0};    // Hash160 result
@@ -800,7 +844,6 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     }
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_threads = gridDim.x * blockDim.x;
     
     // Move these outside the loop - they don't change
     char minRange[65];
@@ -814,7 +857,7 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     hex_to_bigint(maxRange, &max);
     
     // Pre-allocate all working variables
-    BigInt random_value, priv2, priv;
+    BigInt priv2, priv;
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
@@ -829,9 +872,6 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     seed ^= ((uint64_t)gridDim.x << 48) | ((uint64_t)blockDim.x << 32);
     uint64_t rng_state = mix(seed);
     
-    // Add secondary RNG state for better period
-    uint64_t rng_state2 = mix(seed ^ 0xDEADBEEF12345678ULL);
-    
     int c = 0;
     // Use thread-local found flag for early exit
     int local_found = 0;
@@ -842,17 +882,7 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
 
     
     while(local_found == 0 && g_found == 0) {
-        // Generate random value in range
-        generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
-        
-        // Mix in second RNG state periodically
-        if ((c & 0xFF) == 0) {
-            rng_state ^= xorshift64(&rng_state2);
-        }
-        
-        // Convert to hex once
-        bigint_to_hex(&random_value, hex);
-        
+		generate_random_hex_after_first1(hex, minRange, maxRange, &rng_state);
         // Unroll the outer loops for better performance
         #pragma unroll 2
         for(int inv = 0; inv < 2; inv++) {
@@ -883,7 +913,7 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
                     hash160(pubkey, 33, hash160_out);
                     
                     
-                    if (tid == 0) {
+                    if (tid == 0 && z == 0 && inv == 0 && x == 0) {
 						hash160_to_hex(hash160_out, hash160_str);
 						printf("%s - %s\n", hex, hash160_str);
  
@@ -931,6 +961,7 @@ int main(int argc, char* argv[]) {
     }
     
     try {
+
         init_gpu_constants();
         
         // Allocate device memory for 3 strings
