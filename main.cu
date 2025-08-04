@@ -839,12 +839,7 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     // Pre-convert target hex to bytes for faster comparison
     uint8_t target_bytes[20];
     hex_string_to_bytes(target, target_bytes, 20);
-    
-    // Performance tracking variables
-    unsigned long long local_keys_checked = 0;
-    unsigned long long last_report_keys = 0;
-    clock_t start_time = clock64();
-    clock_t last_report_time = start_time;
+
     
     while(local_found == 0 && g_found == 0) {
         // Generate random value in range
@@ -887,33 +882,11 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
                     // Compute hash160
                     hash160(pubkey, 33, hash160_out);
                     
-                    // Increment local counter
-                    local_keys_checked++;
                     
-                    // Performance reporting - only one thread reports
-                    if (tid == 0 && (local_keys_checked - last_report_keys) >= 10000) {
-                        clock_t current_time = clock64();
-                        double elapsed_seconds = (double)(current_time - last_report_time) / 1000000000.0; // clock64 is in nanoseconds
-                        
-                        if (elapsed_seconds >= 1.0) { // Report every second
-                            // Update global counter
-                            unsigned long long keys_this_period = local_keys_checked - last_report_keys;
-                            atomicAdd((unsigned long long*)&g_total_keys, keys_this_period * total_threads);
-                            
-                            // Calculate and display speed
-                            double keys_per_second = (keys_this_period * total_threads) / elapsed_seconds;
-                            double total_elapsed = (double)(current_time - start_time) / 1000000000.0;
-                            unsigned long long total_keys = g_total_keys;
-                            
-                            printf("[%.1f s] Speed: %.2f MKey/s | Total keys: %.2f billion | Current: %s\n", 
-                                   total_elapsed,
-                                   keys_per_second / 1000000.0,
-                                   total_keys / 1000000000.0,
-                                   hex);
-                            
-                            last_report_keys = local_keys_checked;
-                            last_report_time = current_time;
-                        }
+                    if (tid == 0) {
+						hash160_to_hex(hash160_out, hash160_str);
+						printf("%s - %s\n", hex, hash160_str);
+ 
                     }
                     
                     // Check if we found the target - use optimized comparison
@@ -948,17 +921,6 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
             invertHexAfterFirst1(hex);
         }
         c++;
-        
-        // Periodic reseeding for very long runs
-        if ((c & 0xFFFFF) == 0) {
-            rng_state ^= clock64();
-            rng_state = mix(rng_state);
-        }
-    }
-    
-    // Final update of global counter when thread exits
-    if (local_keys_checked > last_report_keys) {
-        atomicAdd((unsigned long long*)&g_total_keys, local_keys_checked - last_report_keys);
     }
 }
 
