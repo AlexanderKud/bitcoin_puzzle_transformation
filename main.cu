@@ -1405,16 +1405,13 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 						{
                             for(int x = 0; x < 16; x++)
 							{
-                                    
 								binary_to_bigint_direct(binary, &priv2);
-								
 								
 								if (compare_bigint(&priv2, &const_n) >= 0) {
 									ptx_u256Sub(&priv, &priv2, &const_n);
 								} else {
 									copy_bigint(&priv, &priv2);
 								}
-								
 								
 								scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
 								jacobian_to_affine(&public_key, &result_jac);
