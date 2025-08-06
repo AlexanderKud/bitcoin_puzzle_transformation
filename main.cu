@@ -10,6 +10,15 @@
 #include <stdint.h>
 #include <curand_kernel.h>
 
+#define CHECK_CUDA(call) do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error in %s at line %d: %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+
 // Optimized rotate right for SHA-256
 __device__ inline uint32_t rotr(uint32_t x, uint32_t n) {
     return (x >> n) | (x << (32 - n));
@@ -857,7 +866,7 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     hex_to_bigint(maxRange, &max);
     
     // Pre-allocate all working variables
-    BigInt priv2, priv;
+    BigInt priv;
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
@@ -883,73 +892,58 @@ __global__ void start(const char* minRangePure, const char* maxRangePure, const 
     
     while(local_found == 0 && g_found == 0) {
 		generate_random_hex_after_first1(hex, minRange, maxRange, &rng_state);
-        // Unroll the outer loops for better performance
-        #pragma unroll 2
-        for(int inv = 0; inv < 2; inv++) {
-            #pragma unroll 2
-            for(int z = 0; z < 2; z++) {
-                // Process 16 variations
-                #pragma unroll 4
-                for(int x = 0; x < 16; x++) {
-                    // Convert hex to bigint
-                    hex_to_bigint(hex, &priv2);
-                    
-                    // Use direct assignment instead of copy_bigint if possible
-                    priv = priv2;
-                    
-                    // Reduce modulo n
-                    scalar_mod_n(&priv, &priv);
-                    
-                    // Scalar multiplication in Jacobian coordinates
-                    scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-                    
-                    // Convert to affine coordinates
-                    jacobian_to_affine(&public_key, &result_jac);
-                    
-                    // Generate compressed public key
-                    coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-                    
-                    // Compute hash160
-                    hash160(pubkey, 33, hash160_out);
-                    
-                    
-                    if (tid == 0 && z == 0 && inv == 0 && x == 0) {
-						hash160_to_hex(hash160_out, hash160_str);
-						printf("%s - %s\n", hex, hash160_str);
- 
-                    }
-                    
-                    // Check if we found the target - use optimized comparison
-                    if (compare_hash160(hash160_out, target_bytes)) {
-                        // Try to claim the found flag atomically
-                        if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-                            // Convert hash160 to string
-                            hash160_to_hex(hash160_out, hash160_str);
-                            
-                            // Copy results to global memory
-                            int hex_len = d_strlen(hex);
-                            // Use single memcpy for efficiency
-                            memcpy(g_found_hex, hex, hex_len + 1);
-                            memcpy(g_found_hash160, hash160_str, 41);
-                            
-                            printf("\n*** FOUND! ***\n");
-                            printf("Private Key: %s\n", hex);
-                            printf("Hash160: %s\n", hash160_str);
-                            printf("Total keys checked: %.2f billion\n", g_total_keys / 1000000000.0);
-                        }
-                        local_found = 1;
-                        break;
-                    }
-                    
-                    // Rotate hex for next iteration
-                    hex_vertical_rotate_up(hex);
-                }
-                if (local_found) break;
-                reverseAfterFirst1(hex);
-            }
-            if (local_found) break;
-            invertHexAfterFirst1(hex);
-        }
+
+		for(int x = 0; x < 16; x++) {
+			// Convert hex to bigint
+			hex_to_bigint(hex, &priv);
+			// Reduce modulo n
+			scalar_mod_n(&priv, &priv);
+			
+			// Scalar multiplication in Jacobian coordinates
+			scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
+			
+			// Convert to affine coordinates
+			jacobian_to_affine(&public_key, &result_jac);
+			
+			// Generate compressed public key
+			coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+			
+			// Compute hash160
+			hash160(pubkey, 33, hash160_out);
+			
+			
+			if (tid == 0 && x == 0) {
+				hash160_to_hex(hash160_out, hash160_str);
+				printf("%s - %s\n", hex, hash160_str);
+
+			}
+			
+			// Check if we found the target - use optimized comparison
+			if (compare_hash160(hash160_out, target_bytes)) {
+				// Try to claim the found flag atomically
+				if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+					// Convert hash160 to string
+					hash160_to_hex(hash160_out, hash160_str);
+					
+					// Copy results to global memory
+					int hex_len = d_strlen(hex);
+					// Use single memcpy for efficiency
+					memcpy(g_found_hex, hex, hex_len + 1);
+					memcpy(g_found_hash160, hash160_str, 41);
+					
+					printf("\n*** FOUND! ***\n");
+					printf("Private Key: %s\n", hex);
+					printf("Hash160: %s\n", hash160_str);
+					printf("Total keys checked: %.2f billion\n", g_total_keys / 1000000000.0);
+				}
+				local_found = 1;
+				break;
+			}
+			
+			// Rotate hex for next iteration
+			hex_vertical_rotate_up(hex);
+		}
+        
         c++;
     }
 }
