@@ -1365,14 +1365,9 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     BigInt min, max;
     hex_to_bigint(minRange, &min);
     hex_to_bigint(maxRange, &max);
-    // Performance tracking variables
     unsigned long long local_keys_checked = 0;
-    // Improved seeding with better entropy mixing
-    uint64_t seed = clock64();
-    seed ^= ((uint64_t)tid << 32) | ((uint64_t)blockIdx.x << 16) | threadIdx.x;
-    seed = mix(seed);
-    seed ^= ((uint64_t)gridDim.x << 48) | ((uint64_t)blockDim.x << 32);
-    uint64_t rng_state = mix(seed);
+    uint64_t seed = clock64() + tid;
+
     
     // Pre-allocate ALL working variables once - avoid repeated allocation overhead
     BigInt random_value, priv2, priv;
@@ -1390,7 +1385,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     
     int c = 0;
     while(local_found == 0 && g_found == 0) {
-        generate_random_bigint_range_fast(&rng_state, &min, &max, &random_value);
+        generate_random_bigint_range_fast(&seed, &min, &max, &random_value);
         bigint_to_binary(&random_value, binary);
         
         for(int p = 0; p < 2; p++)
@@ -1443,7 +1438,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
 										printf("Hash160: %s\n", hash160_str);
 									}
 									local_found = 1;
-									goto exit_loops; // Break all nested loops efficiently
 								}
                                 binary_vertical_rotate_up(binary);
                             }
@@ -1457,7 +1451,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
             }
 			binary_pair_swap(binary);
         }
-        exit_loops:;
         c++;
     }
 }
