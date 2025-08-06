@@ -1540,8 +1540,8 @@ int main(int argc, char* argv[]) {
         
         printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
                blocks, threads, blocks * threads);
-        printf("Dont forget to test on small puzzles");
-		printf("Also if you liked the program consider donating: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk");
+        printf("Dont forget to test on small puzzles\n\n");
+		printf("Also if you liked the program consider donating: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk\n\n");
         // Launch kernel
         start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
         
