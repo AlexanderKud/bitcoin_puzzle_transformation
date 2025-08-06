@@ -1356,102 +1356,123 @@ __device__ void bigint_add_uint32(BigInt* bigint, uint32_t val) {
         carry = (uint32_t)(sum >> 32);
     }
 }
-// Optimization 1: Pre-allocate and reuse more variables
 __global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
-    if (threadIdx.x == 0 && blockIdx.x == 0) {
-        printf("min: %s\n", minRangePure);
-        printf("max: %s\n", maxRangePure);
-        printf("ripemd160 target: %s\n\n", target);
-    }
+    // Use shared memory for frequently accessed data
+    __shared__ uint8_t shared_target[20];
+    __shared__ char shared_minRange[65];
+    __shared__ char shared_maxRange[65];
+    __shared__ int shared_length;
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-	int length = str_len(minRangePure);
-
-
-	char minRange[65];
-    leftPad64(minRange, minRangePure);
-	char maxRange[65];
-    leftPad64(maxRange, maxRangePure);
     
-    // Convert min/max to BigInt once outside the loop
+    // Single thread initializes shared memory
+    if (threadIdx.x == 0) {
+        // Copy to shared memory
+        int length = str_len(minRangePure);
+        shared_length = length;
+        leftPad64(shared_minRange, minRangePure);
+        leftPad64(shared_maxRange, maxRangePure);
+        hex_string_to_bytes(target, shared_target, 20);
+        
+        if (blockIdx.x == 0) {
+            printf("min: %s\n", minRangePure);
+            printf("max: %s\n", maxRangePure);
+            printf("ripemd160 target: %s\n\n", target);
+        }
+    }
+    __syncthreads();
+    
+    // Convert min/max to BigInt once per thread
     BigInt min, max;
-    hex_to_bigint(minRange, &min);
-    hex_to_bigint(maxRange, &max);
-    unsigned long long local_keys_checked = 0;
-    uint64_t seed = clock64() + tid;
-
+    hex_to_bigint(shared_minRange, &min);
+    hex_to_bigint(shared_maxRange, &max);
     
-    // Pre-allocate ALL working variables once - avoid repeated allocation overhead
-    BigInt random_value, priv2, priv;
+    // Use better seed mixing for randomness
+    uint64_t seed = clock64() ^ (tid * 0x9e3779b97f4a7c15ULL);
+    
+    // Pre-allocate working variables
+    BigInt random_value, priv;
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
     uint8_t hash160_out[20];
-    char hash160_str[41];
-    char temp_hex[65];
     char binary[257];
-    int local_found = 0;
-    // Pre-convert target once
-    uint8_t target_bytes[20];
-    hex_string_to_bytes(target, target_bytes, 20);
     
+    // Cache-friendly iteration counters
     int c = 0;
-    while(local_found == 0 && g_found == 0) {
+    const int length = shared_length;
+    const int inner_iterations = length - 4;
+    
+    // Main loop with optimized control flow
+    while(g_found == 0) {
+        // Generate random starting point
         generate_random_bigint_range_fast(&seed, &min, &max, &random_value);
-		bigint_add_uint32(&random_value, tid);
+        bigint_add_uint32(&random_value, tid);
         bigint_to_binary(&random_value, binary);
         
-        for(int p = 0; p < 2; p++)
-		{
-            for(int il = 0; il < 2; il++)
-			{
-				for(int inv = 0; inv < 2; inv++)
-				{
-					for(int z = 0; z < 2; z++)
-					{
-                        for(int y = 0; y < length - 4; y++)
-						{
-                            for(int x = 0; x < 16; x++)
-							{
-								binary_to_bigint_direct(binary, &priv2);
-								
-								if (compare_bigint(&priv2, &const_n) >= 0) {
-									ptx_u256Sub(&priv, &priv2, &const_n);
-								} else {
-									copy_bigint(&priv, &priv2);
-								}
-								
-								scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-								jacobian_to_affine(&public_key, &result_jac);
-								coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-								hash160(pubkey, 33, hash160_out);
-								
-								local_keys_checked++;
-								
-								if(tid == 0 && inv == 0 && z == 0 && p == 0 && il == 0 && y == 0 && x == 0)
-								{
-									hash160_to_hex(hash160_out, hash160_str);
-									char hex_str[65];
-									bigint_to_hex(&priv, hex_str);
-									printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-								}
-								
-								// Optimization 3: Early exit with minimal branching
-								if (compare_hash160_fast(hash160_out, target_bytes)) {
-									if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-										// Only convert to hex when found
-										binary_to_hex(binary, temp_hex);
-										hash160_to_hex(hash160_out, hash160_str);
-										
-										memcpy(g_found_hex, temp_hex, 65);
-										memcpy(g_found_hash160, hash160_str, 41);
-										
-										printf("\n*** FOUND! ***\n");
-										printf("Private Key: %s\n", temp_hex);
-										printf("Hash160: %s\n", hash160_str);
-									}
-									local_found = 1;
-								}
+        // Unroll outer loops for better performance
+        #pragma unroll 2
+        for(int p = 0; p < 2; p++) {
+            #pragma unroll 2
+            for(int il = 0; il < 2; il++) {
+                #pragma unroll 2
+                for(int inv = 0; inv < 2; inv++) {
+                    #pragma unroll 2
+                    for(int z = 0; z < 2; z++) {
+                        // Inner loops with reduced branching
+                        for(int y = 0; y < inner_iterations; y++) {
+                            // Process 16 rotations in batches
+                            #pragma unroll 4
+                            for(int x = 0; x < 16; x++) {
+                                // Core computation
+                                binary_to_bigint_direct(binary, &priv);
+                                
+                                // Use optimized EC operations
+                                scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
+                                jacobian_to_affine(&public_key, &result_jac);
+                                coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+                                hash160(pubkey, 33, hash160_out);
+                                
+                                // Debug output only for first thread and iteration
+                                if(__builtin_expect(tid == 0 && c == 0 && p == 0 && il == 0 && 
+                                   inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
+                                    char hash160_str[41];
+                                    char hex_str[65];
+                                    hash160_to_hex(hash160_out, hash160_str);
+                                    bigint_to_hex(&priv, hex_str);
+                                    printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
+                                }
+                                
+                                // Optimized comparison using vectorized operations
+                                bool match = true;
+                                #pragma unroll 5
+                                for(int i = 0; i < 20; i += 4) {
+                                    uint32_t* h = (uint32_t*)&hash160_out[i];
+                                    uint32_t* t = (uint32_t*)&shared_target[i];
+                                    if(*h != *t) {
+                                        match = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if(__builtin_expect(match, 0)) {
+                                    // Found a match - use atomic to ensure single winner
+                                    if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+                                        char temp_hex[65];
+                                        char hash160_str[41];
+                                        binary_to_hex(binary, temp_hex);
+                                        hash160_to_hex(hash160_out, hash160_str);
+                                        
+                                        memcpy(g_found_hex, temp_hex, 65);
+                                        memcpy(g_found_hash160, hash160_str, 41);
+
+                                        printf("\n*** FOUND! ***\n");
+                                        printf("Private Key: %s\n", temp_hex);
+                                        printf("Hash160: %s\n", hash160_str);
+                                    }
+                                    return; // Exit immediately
+                                }
+                                
                                 binary_vertical_rotate_up(binary);
                             }
                             binary_rotate_left_by_one(binary);
@@ -1460,11 +1481,14 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                     }
                     invertBinaryAfterFirst1(binary);
                 }
-				binary_interleave(binary);
+                binary_interleave(binary);
             }
-			binary_pair_swap(binary);
+            binary_pair_swap(binary);
         }
         c++;
+        
+        // Periodic early exit check to reduce memory traffic
+        if((c & 0xFF) == 0 && g_found) return;
     }
 }
 int main(int argc, char* argv[]) {
@@ -1516,7 +1540,8 @@ int main(int argc, char* argv[]) {
         
         printf("Launching with %d blocks and %d threads\nTotal parallel threads: %d\n\n", 
                blocks, threads, blocks * threads);
-        
+        printf("Dont forget to test on small puzzles");
+		printf("Also if you liked the program consider donating: bc1p6fmhpep0wkqkzvw86fg0afz85fyw692vmcg05460yuqstva7qscs2d9xhk");
         // Launch kernel
         start_optimized<<<blocks, threads>>>(d_param1, d_param2, d_param3);
         
