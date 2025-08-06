@@ -1343,7 +1343,19 @@ __device__ void binary_bit_shuffle(char* binary) {
         binary[len - 1 - i] = temp;
     }
 }
+// Adds a 32-bit unsigned integer 'val' to 'bigint' in-place
+__device__ void bigint_add_uint32(BigInt* bigint, uint32_t val) {
+    uint64_t sum = (uint64_t)bigint->data[0] + val;
+    bigint->data[0] = (uint32_t)(sum & 0xFFFFFFFF);
+    uint32_t carry = (uint32_t)(sum >> 32);
 
+    // Propagate carry if needed
+    for (int i = 1; i < 8 && carry != 0; i++) {
+        sum = (uint64_t)bigint->data[i] + carry;
+        bigint->data[i] = (uint32_t)(sum & 0xFFFFFFFF);
+        carry = (uint32_t)(sum >> 32);
+    }
+}
 // Optimization 1: Pre-allocate and reuse more variables
 __global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -1386,6 +1398,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     int c = 0;
     while(local_found == 0 && g_found == 0) {
         generate_random_bigint_range_fast(&seed, &min, &max, &random_value);
+		bigint_add_uint32(&random_value, tid);
         bigint_to_binary(&random_value, binary);
         
         for(int p = 0; p < 2; p++)
