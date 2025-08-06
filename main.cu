@@ -1343,15 +1343,95 @@ __device__ void binary_bit_shuffle(char* binary) {
         binary[len - 1 - i] = temp;
     }
 }
-// Adds a 32-bit unsigned integer 'val' to 'bigint' in-place
-__device__ void bigint_add_uint32(BigInt* bigint, uint32_t val) {
-    uint64_t sum = (uint64_t)bigint->data[0] + val;
-    bigint->data[0] = (uint32_t)(sum & 0xFFFFFFFF);
-    uint32_t carry = (uint32_t)(sum >> 32);
-
-    // Propagate carry if needed
+__device__ void bigint_add_uint32_range(BigInt* bigint, uint32_t step, 
+                                        const BigInt* min, const BigInt* max) {
+    // First calculate the range size: range = max - min + 1
+    BigInt range;
+    uint32_t borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t minuend = max->data[i];
+        uint64_t subtrahend = min->data[i] + borrow;
+        
+        if (minuend >= subtrahend) {
+            range.data[i] = (uint32_t)(minuend - subtrahend);
+            borrow = 0;
+        } else {
+            range.data[i] = (uint32_t)((0x100000000ULL + minuend) - subtrahend);
+            borrow = 1;
+        }
+    }
+    // Add 1 to range (for inclusive range)
+    uint32_t carry = 1;
+    for (int i = 0; i < 8 && carry; i++) {
+        uint64_t sum = (uint64_t)range.data[i] + carry;
+        range.data[i] = (uint32_t)(sum & 0xFFFFFFFF);
+        carry = (uint32_t)(sum >> 32);
+    }
+    
+    // Calculate position within range: pos = (bigint - min)
+    BigInt position;
+    borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t minuend = bigint->data[i];
+        uint64_t subtrahend = min->data[i] + borrow;
+        
+        if (minuend >= subtrahend) {
+            position.data[i] = (uint32_t)(minuend - subtrahend);
+            borrow = 0;
+        } else {
+            position.data[i] = (uint32_t)((0x100000000ULL + minuend) - subtrahend);
+            borrow = 1;
+        }
+    }
+    
+    // Add step to position
+    uint64_t sum = (uint64_t)position.data[0] + step;
+    position.data[0] = (uint32_t)(sum & 0xFFFFFFFF);
+    carry = (uint32_t)(sum >> 32);
     for (int i = 1; i < 8 && carry != 0; i++) {
-        sum = (uint64_t)bigint->data[i] + carry;
+        sum = (uint64_t)position.data[i] + carry;
+        position.data[i] = (uint32_t)(sum & 0xFFFFFFFF);
+        carry = (uint32_t)(sum >> 32);
+    }
+    
+    // Now we need: position = position % range
+    // For simplicity, use repeated subtraction
+    while (true) {
+        // Check if position >= range
+        bool greater_or_equal = false;
+        for (int i = 7; i >= 0; i--) {
+            if (position.data[i] > range.data[i]) {
+                greater_or_equal = true;
+                break;
+            } else if (position.data[i] < range.data[i]) {
+                break;
+            } else if (i == 0) {
+                greater_or_equal = true; // All equal
+            }
+        }
+        
+        if (!greater_or_equal) break;
+        
+        // Subtract range from position
+        borrow = 0;
+        for (int i = 0; i < 8; i++) {
+            uint64_t minuend = position.data[i];
+            uint64_t subtrahend = range.data[i] + borrow;
+            
+            if (minuend >= subtrahend) {
+                position.data[i] = (uint32_t)(minuend - subtrahend);
+                borrow = 0;
+            } else {
+                position.data[i] = (uint32_t)((0x100000000ULL + minuend) - subtrahend);
+                borrow = 1;
+            }
+        }
+    }
+    
+    // Finally: bigint = min + position
+    carry = 0;
+    for (int i = 0; i < 8; i++) {
+        sum = (uint64_t)min->data[i] + position.data[i] + carry;
         bigint->data[i] = (uint32_t)(sum & 0xFFFFFFFF);
         carry = (uint32_t)(sum >> 32);
     }
@@ -1387,108 +1467,157 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     hex_to_bigint(shared_minRange, &min);
     hex_to_bigint(shared_maxRange, &max);
     
-    // Use better seed mixing for randomness
+    // RANDOM ONLY ONCE: Generate initial position
     uint64_t seed = clock64() ^ (tid * 0x9e3779b97f4a7c15ULL);
+    BigInt current_position;
+    generate_random_bigint_range_fast(&seed, &min, &max, &current_position);
     
     // Pre-allocate working variables
-    BigInt random_value, priv;
+    BigInt priv;
     ECPointJac result_jac;
     ECPoint public_key;
     uint8_t pubkey[33];
     uint8_t hash160_out[20];
     char binary[257];
     
-    // Cache-friendly iteration counters
+    // Deterministic step sizes for different movement patterns
+    // Using values that work with your existing bigint_add_uint32_range function
+    const uint64_t large_step = 999999999999999997ULL;  // Large prime for big jumps
+    const uint64_t medium_step = 111111111111111111ULL; // Your original step value
+    const uint64_t small_step = 1597;                    // Fibonacci prime for local exploration
+    
+    // Iteration counters
+    uint64_t global_iter = 0;
+    uint32_t pattern_phase = 0;
     int c = 0;
     const int length = shared_length;
     const int inner_iterations = length - 4;
-    
-    // Main loop with optimized control flow
+    // Main deterministic traversal loop
     while(g_found == 0) {
-        // Generate random starting point
-        generate_random_bigint_range_fast(&seed, &min, &max, &random_value);
-        bigint_add_uint32(&random_value, tid);
-        bigint_to_binary(&random_value, binary);
         
-        // Unroll outer loops for better performance
-        #pragma unroll 2
-        for(int p = 0; p < 2; p++) {
+        // Convert current position to binary for transformations
+        bigint_to_binary(&current_position, binary);
+        
+        // Phase 1: Local binary pattern exploration (no randomness)
+        for(int inv = 0; inv < 2; inv++) {
             #pragma unroll 2
-            for(int il = 0; il < 2; il++) {
-                #pragma unroll 2
-                for(int inv = 0; inv < 2; inv++) {
-                    #pragma unroll 2
-                    for(int z = 0; z < 2; z++) {
-                        // Inner loops with reduced branching
-                        for(int y = 0; y < inner_iterations; y++) {
-                            // Process 16 rotations in batches
-                            #pragma unroll 4
-                            for(int x = 0; x < 16; x++) {
-                                // Core computation
-                                binary_to_bigint_direct(binary, &priv);
-                                
-                                // Use optimized EC operations
-                                scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-                                jacobian_to_affine(&public_key, &result_jac);
-                                coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-                                hash160(pubkey, 33, hash160_out);
-                                
-                                // Debug output only for first thread and iteration
-                                if(__builtin_expect(tid == 0 && p == 0 && il == 0 && 
-                                   inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
-                                    char hash160_str[41];
-                                    char hex_str[65];
-                                    hash160_to_hex(hash160_out, hash160_str);
-                                    bigint_to_hex(&priv, hex_str);
-                                    printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-                                }
-                                
-                                // Optimized comparison using vectorized operations
-                                bool match = true;
-                                #pragma unroll 5
-                                for(int i = 0; i < 20; i += 4) {
-                                    uint32_t* h = (uint32_t*)&hash160_out[i];
-                                    uint32_t* t = (uint32_t*)&shared_target[i];
-                                    if(*h != *t) {
-                                        match = false;
-                                        break;
-                                    }
-                                }
-                                
-                                if(__builtin_expect(match, 0)) {
-                                    // Found a match - use atomic to ensure single winner
-                                    if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-                                        char temp_hex[65];
-                                        char hash160_str[41];
-                                        binary_to_hex(binary, temp_hex);
-                                        hash160_to_hex(hash160_out, hash160_str);
-                                        
-                                        memcpy(g_found_hex, temp_hex, 65);
-                                        memcpy(g_found_hash160, hash160_str, 41);
+            for(int z = 0; z < 2; z++) {
+				for(int y = 0; y < inner_iterations; y++) {
+					#pragma unroll 4
+					for(int x = 0; x < 16; x++) {
+						// Core computation
+						binary_to_bigint_direct(binary, &priv);
+						
+						// EC operations
+						scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
+						jacobian_to_affine(&public_key, &result_jac);
+						coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+						hash160(pubkey, 33, hash160_out);
+						
+						// Debug output only for first thread and iteration
+						if(__builtin_expect(tid == 0 && inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
+							char hash160_str[41];
+							char hex_str[65];
+							hash160_to_hex(hash160_out, hash160_str);
+							bigint_to_hex(&priv, hex_str);
+							printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
+						}
+						
+						// Check for match using vectorized operations
+						bool match = true;
+						#pragma unroll 5
+						for(int i = 0; i < 20; i += 4) {
+							uint32_t* h = (uint32_t*)&hash160_out[i];
+							uint32_t* t = (uint32_t*)&shared_target[i];
+							if(*h != *t) {
+								match = false;
+								break;
+							}
+						}
+						
+						if(__builtin_expect(match, 0)) {
+							// Found a match - use atomic to ensure single winner
+							if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+								char temp_hex[65];
+								char hash160_str[41];
+								binary_to_hex(binary, temp_hex);
+								hash160_to_hex(hash160_out, hash160_str);
+								
+								memcpy(g_found_hex, temp_hex, 65);
+								memcpy(g_found_hash160, hash160_str, 41);
 
-                                        printf("\n*** FOUND! ***\n");
-                                        printf("Private Key: %s\n", temp_hex);
-                                        printf("Hash160: %s\n", hash160_str);
-                                    }
-                                    return; // Exit immediately
-                                }
-                                
-                                binary_vertical_rotate_up(binary);
-                            }
-                            binary_rotate_left_by_one(binary);
-                        }
-                        reverseBinaryAfterFirst1(binary);
-                    }
-                    invertBinaryAfterFirst1(binary);
+								printf("\n*** FOUND! ***\n");
+								printf("Private Key: %s\n", temp_hex);
+								printf("Hash160: %s\n", hash160_str);
+							}
+							return; // Exit immediately
+						}
+						binary_vertical_rotate_up(binary);
+					}
+					binary_rotate_left_by_one(binary);
                 }
-                binary_interleave(binary);
+                reverseBinaryAfterFirst1(binary);
             }
-            binary_pair_swap(binary);
+            invertBinaryAfterFirst1(binary);
         }
-        c++;
         
-        // Periodic early exit check to reduce memory traffic
-        if((c & 0xFF) == 0 && g_found) return;
+        // Phase 2: Deterministic jump to next exploration region
+        // Use different step patterns to ensure good coverage
+        pattern_phase = (pattern_phase + 1) % 3;
+        
+        uint64_t step_size;
+        switch(pattern_phase) {
+            case 0:
+                // Large jumps - thread-specific to avoid collisions
+                step_size = large_step + (tid * 1000000007ULL);
+                break;
+            case 1:
+                // Medium jumps - using your original step value
+                step_size = medium_step;
+                break;
+            case 2:
+                // Small steps for local density - varies with iteration
+                step_size = small_step * ((global_iter % 89) + 1);
+                break;
+        }
+        
+        // Use your existing function to add and wrap within range
+        bigint_add_uint32_range(&current_position, step_size, &min, &max);
+        
+        // Additional deterministic variations every few iterations
+        if ((global_iter % 7) == 0) {
+            // Apply additional binary transformation to current position
+            bigint_to_binary(&current_position, binary);
+            
+            // Rotate based on thread ID to ensure different patterns per thread
+            for(int r = 0; r < (tid % 5) + 1; r++) {
+                binary_vertical_rotate_up(binary);
+            }
+            
+            binary_to_bigint_direct(binary, &current_position);
+            
+            // Ensure we're still in range after transformation
+            if(bigint_compare(&current_position, &max) > 0) {
+                current_position = min;  // Wrap to beginning
+            } else if(bigint_compare(&current_position, &min) < 0) {
+                current_position = max;  // Wrap to end
+            }
+        }
+        
+        c++;
+        global_iter++;
+        
+        // Periodic progress report and early exit check
+        if((c & 0xFF) == 0) {
+            if(g_found) return;
+            
+            // Occasional progress output for debugging
+            if(tid == 0 && (c & 0xFFFF) == 0) {
+                char hex_str[65];
+                bigint_to_hex(&current_position, hex_str);
+                printf("Thread 0 iteration %d at position: %s\n", c, hex_str);
+            }
+        }
     }
 }
 int main(int argc, char* argv[]) {
