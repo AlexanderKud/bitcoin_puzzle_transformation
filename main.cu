@@ -1434,7 +1434,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
                                 hash160(pubkey, 33, hash160_out);
                                 
                                 // Debug output only for first thread and iteration
-                                if(__builtin_expect(tid == 0 && c == 0 && p == 0 && il == 0 && 
+                                if(__builtin_expect(tid == 0 && p == 0 && il == 0 && 
                                    inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
                                     char hash160_str[41];
                                     char hex_str[65];
