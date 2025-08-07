@@ -1502,61 +1502,55 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
         for(int inv = 0; inv < 2; inv++) {
             #pragma unroll 2
             for(int z = 0; z < 2; z++) {
-				for(int y = 0; y < inner_iterations; y++) {
-					#pragma unroll 4
-					for(int x = 0; x < 16; x++) {
-						// Core computation
-						binary_to_bigint_direct(binary, &priv);
-						
-						// EC operations
-						scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-						jacobian_to_affine(&public_key, &result_jac);
-						coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-						hash160(pubkey, 33, hash160_out);
-						
-						// Debug output only for first thread and iteration
-						if(__builtin_expect(tid == 0 && inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
-							char hash160_str[41];
-							char hex_str[65];
-							hash160_to_hex(hash160_out, hash160_str);
-							bigint_to_hex(&priv, hex_str);
-							printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-						}
-						
-						// Check for match using vectorized operations
-						bool match = true;
-						#pragma unroll 5
-						for(int i = 0; i < 20; i += 4) {
-							uint32_t* h = (uint32_t*)&hash160_out[i];
-							uint32_t* t = (uint32_t*)&shared_target[i];
-							if(*h != *t) {
-								match = false;
-								break;
-							}
-						}
-						
-						if(__builtin_expect(match, 0)) {
-							// Found a match - use atomic to ensure single winner
-							if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-								char temp_hex[65];
-								char hash160_str[41];
-								binary_to_hex(binary, temp_hex);
-								hash160_to_hex(hash160_out, hash160_str);
-								
-								memcpy(g_found_hex, temp_hex, 65);
-								memcpy(g_found_hash160, hash160_str, 41);
 
-								printf("\n*** FOUND! ***\n");
-								printf("Private Key: %s\n", temp_hex);
-								printf("Hash160: %s\n", hash160_str);
-							}
-							return; // Exit immediately
-						}
-						binary_vertical_rotate_up(binary);
+					// Core computation
+					binary_to_bigint_direct(binary, &priv);
+					
+					// EC operations
+					scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
+					jacobian_to_affine(&public_key, &result_jac);
+					coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+					hash160(pubkey, 33, hash160_out);
+					
+					// Debug output only for first thread and iteration
+					if(__builtin_expect(tid == 0 && inv == 0 && z == 0, 0)) {
+						char hash160_str[41];
+						char hex_str[65];
+						hash160_to_hex(hash160_out, hash160_str);
+						bigint_to_hex(&priv, hex_str);
+						printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
 					}
-					binary_rotate_left_by_one(binary);
-                }
-                reverseBinaryAfterFirst1(binary);
+					
+					// Check for match using vectorized operations
+					bool match = true;
+					#pragma unroll 5
+					for(int i = 0; i < 20; i += 4) {
+						uint32_t* h = (uint32_t*)&hash160_out[i];
+						uint32_t* t = (uint32_t*)&shared_target[i];
+						if(*h != *t) {
+							match = false;
+							break;
+						}
+					}
+					
+					if(__builtin_expect(match, 0)) {
+						// Found a match - use atomic to ensure single winner
+						if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+							char temp_hex[65];
+							char hash160_str[41];
+							binary_to_hex(binary, temp_hex);
+							hash160_to_hex(hash160_out, hash160_str);
+							
+							memcpy(g_found_hex, temp_hex, 65);
+							memcpy(g_found_hash160, hash160_str, 41);
+
+							printf("\n*** FOUND! ***\n");
+							printf("Private Key: %s\n", temp_hex);
+							printf("Hash160: %s\n", hash160_str);
+						}
+						return; // Exit immediately
+					}
+				reverseBinaryAfterFirst1(binary);
             }
             invertBinaryAfterFirst1(binary);
         }
