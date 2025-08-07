@@ -1490,7 +1490,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     uint64_t global_iter = 0;
     uint32_t pattern_phase = 0;
     int c = 0;
-    const int length = shared_length;
     // Main deterministic traversal loop
     while(g_found == 0) {
         
