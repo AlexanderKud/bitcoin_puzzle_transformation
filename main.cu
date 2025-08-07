@@ -1441,7 +1441,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     __shared__ uint8_t shared_target[20];
     __shared__ char shared_minRange[65];
     __shared__ char shared_maxRange[65];
-    __shared__ int shared_length;
     
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -1449,7 +1448,6 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     if (threadIdx.x == 0) {
         // Copy to shared memory
         int length = str_len(minRangePure);
-        shared_length = length;
         leftPad64(shared_minRange, minRangePure);
         leftPad64(shared_maxRange, maxRangePure);
         hex_string_to_bytes(target, shared_target, 20);
