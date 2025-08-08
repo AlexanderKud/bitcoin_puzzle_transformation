@@ -407,229 +407,53 @@ __device__ __forceinline__ uint64_t xorshift64(uint64_t* state) {
     return x;
 }
 
-__device__ inline uint64_t rotl64(uint64_t x, int k) {
-    return (x << k) | (x >> (64 - k));
-}
-
-
-// Method 0: Chaotic mixing
-__device__ void generate_method_chaotic(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                       int highest_word, int highest_bit, BigInt* result) {
-    uint32_t chaos_counter = 0;
-    
-    while (true) {
-        BigInt candidate = {0};
-        uint64_t mixer = xorshift64(rng_state);
-        
-        #pragma unroll 4
-        for (int i = 0; i <= highest_word && i < 4; i++) {
-            uint64_t r1 = xorshift64(rng_state);
-            uint64_t r2 = xorshift64(rng_state);
-            
-            r1 ^= (r2 << 17) | (r2 >> 47);
-            r2 = r1 * 0x9E3779B97F4A7C15ULL;
-            r1 = (r1 >> 30) ^ r2;
-            
-            r1 ^= chaos_counter * 0xDEADBEEF;
-            r2 = rotl64(r2, chaos_counter & 63);
-            
-            if (i * 2 < 8) candidate.data[i * 2] = (uint32_t)(r1 ^ mixer);
-            if (i * 2 + 1 < 8) candidate.data[i * 2 + 1] = (uint32_t)((r2 >> 32) ^ (mixer >> 32));
-            
-            mixer = rotl64(mixer, 13);
-        }
-        
-        for (int i = 0; i <= highest_word && i < 8; i++) {
-            uint32_t val = candidate.data[i];
-            val ^= (val >> 7) ^ (val << 25);
-            val *= 0x85EBCA6B;
-            val ^= (val >> 13) ^ (val << 19);
-            candidate.data[i] = val;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        chaos_counter++;
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-// Method 1: Thread-based entropy
-__device__ void generate_method_entropy(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                       int highest_word, int highest_bit, BigInt* result, int tid) {
-    uint32_t thread_entropy = tid ^ (blockIdx.x << 10) ^ (blockIdx.y << 20);
-    uint64_t time_based = clock64();
-    
-    while (true) {
-        BigInt candidate = {0};
-        
-        uint64_t pcg_state = *rng_state;
-        *rng_state = pcg_state * 0x5851F42D4C957F2DULL + thread_entropy;
-        uint64_t xor_shifted = ((pcg_state >> 18) ^ pcg_state) >> 27;
-        uint32_t rot = pcg_state >> 59;
-        uint64_t pcg_output = (xor_shifted >> rot) | (xor_shifted << ((~rot + 1) & 31));
-        
-        for (int i = 0; i <= highest_word; i++) {
-            uint64_t r1 = xorshift64(rng_state);
-            uint64_t r2 = pcg_output;
-            uint64_t r3 = time_based;
-            
-            r1 ^= rotl64(r2, 23) ^ rotl64(r3, 41);
-            r2 = (r1 * 0x9E3779B97F4A7C15ULL) ^ thread_entropy;
-            r3 = (r2 + r3) * 0xC45979A72B4C8A7FULL;
-            
-            if (i < 8) {
-                candidate.data[i] = (uint32_t)(r1 ^ r2 ^ r3);
-            }
-            
-            pcg_output = r3;
-            time_based = rotl64(time_based, 7) ^ r1;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-// Method 2: Avalanche effect
-__device__ void generate_method_avalanche(uint64_t* rng_state, const BigInt* min, const BigInt* range_plus_one, 
-                                         int highest_word, int highest_bit, BigInt* result) {
-    uint64_t avalanche[4];
-    avalanche[0] = xorshift64(rng_state);
-    avalanche[1] = xorshift64(rng_state);
-    avalanche[2] = xorshift64(rng_state);
-    avalanche[3] = xorshift64(rng_state);
-    
-    while (true) {
-        BigInt candidate = {0};
-        
-        for (int round = 0; round < 3; round++) {
-            avalanche[0] ^= avalanche[3] << 13;
-            avalanche[1] ^= avalanche[0] >> 7;
-            avalanche[2] ^= avalanche[1] << 17;
-            avalanche[3] ^= avalanche[2] >> 11;
-            
-            uint64_t temp = avalanche[0];
-            avalanche[0] = avalanche[1] ^ (avalanche[2] * 0x9E3779B97F4A7C15ULL);
-            avalanche[1] = avalanche[2] + rotl64(avalanche[3], 23);
-            avalanche[2] = avalanche[3] ^ temp;
-            avalanche[3] = temp + avalanche[0];
-        }
-        
-        for (int i = 0; i <= highest_word && i < 8; i++) {
-            uint64_t val = avalanche[i & 3];
-            
-            val ^= val >> 33;
-            val *= 0xFF51AFD7ED558CCDULL;
-            val ^= val >> 33;
-            val *= 0xC4CEB9FE1A85EC53ULL;
-            val ^= val >> 33;
-            
-            candidate.data[i] = (uint32_t)val;
-            avalanche[i & 3] = xorshift64(rng_state) ^ val;
-        }
-        
-        if (highest_word < 8) {
-            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
-            candidate.data[highest_word] &= mask;
-            #pragma unroll
-            for (int i = highest_word + 1; i < 8; i++) {
-                candidate.data[i] = 0;
-            }
-        }
-        
-        if (bigint_compare(&candidate, range_plus_one) < 0) {
-            bigint_add(&candidate, min, result);
-            return;
-        }
-    }
-}
-
-
 
 __device__ void generate_random_bigint_range_fast(uint64_t* rng_state, const BigInt* min, const BigInt* max, BigInt* result) {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    int warp_id = tid / 32;
-    int lane_id = tid % 32;
-    
-    // Calculate range = max - min + 1 (common for all methods)
+    // Calculate range = max - min + 1
     BigInt range, range_plus_one;
     bigint_subtract(max, min, &range);
     
     BigInt one = {1, 0, 0, 0, 0, 0, 0, 0};
     bigint_add(&range, &one, &range_plus_one);
-    
-    // Find highest bit (common for all methods)
+
+    // Find highest bit
     int highest_word = 7;
     while (highest_word > 0 && range_plus_one.data[highest_word] == 0)
         highest_word--;
+
     int highest_bit = 31;
     while (highest_bit > 0 && (range_plus_one.data[highest_word] & (1U << highest_bit)) == 0)
         highest_bit--;
     highest_bit += 1;
-    
-    // Ultra-chaotic method selection
-    uint32_t chaos_seed = tid ^ (warp_id << 5) ^ (lane_id << 10);
-    chaos_seed *= 0x9E3779B9;  // Golden ratio multiplier
-    chaos_seed ^= (chaos_seed >> 16);
-    chaos_seed *= 0x85EBCA6B;
-    chaos_seed ^= (chaos_seed >> 13);
-    chaos_seed *= 0xC2B2AE35;
-    chaos_seed ^= (chaos_seed >> 16);
-    
-    // Multi-factor method selection
-    int method = chaos_seed % 3;
-    
-    // Lane position influence
-    if (lane_id & 1) {  // Odd lanes
-        method = (method + 1) % 3;
-    }
-    if (lane_id & 2) {  // Every 2nd bit set
-        method = (method + 2) % 3;
-    }
-    
-    // Warp-based rotation
-    method = (method + (warp_id & 0x3)) % 3;
-    
-    // Grid position influence
-    uint32_t grid_factor = (blockIdx.x * gridDim.y + blockIdx.y) % 7;
-    if (grid_factor < 3) {
-        method = (method + grid_factor) % 3;
-    }
-    
-    // Branch based on computed method
-    switch (method) {
-        case 0:
-            generate_method_chaotic(rng_state, min, &range_plus_one, highest_word, highest_bit, result);
-            break;
-        case 1:
-            generate_method_entropy(rng_state, min, &range_plus_one, highest_word, highest_bit, result, tid);
-            break;
-        case 2:
-            generate_method_avalanche(rng_state, min, &range_plus_one, highest_word, highest_bit, result);
-            break;
+
+    // Generate random using xorshift
+    while (true) {
+        BigInt candidate = {0};
+
+        // Fill with random data - optimized loop
+        #pragma unroll 4
+        for (int i = 0; i <= highest_word && i < 4; i++) {
+            uint64_t r = xorshift64(rng_state);
+            if (i * 2 < 8) candidate.data[i * 2] = (uint32_t)r;
+            if (i * 2 + 1 < 8) candidate.data[i * 2 + 1] = (uint32_t)(r >> 32);
+        }
+
+        // Mask highest word
+        if (highest_word < 8) {
+            uint32_t mask = (highest_bit == 32) ? 0xFFFFFFFF : ((1U << highest_bit) - 1);
+            candidate.data[highest_word] &= mask;
+            
+            #pragma unroll
+            for (int i = highest_word + 1; i < 8; i++) {
+                candidate.data[i] = 0;
+            }
+        }
+
+        // Check if in range
+        if (bigint_compare(&candidate, &range_plus_one) < 0) {
+            bigint_add(&candidate, min, result);
+            return;
+        }
     }
 }
 
@@ -1449,7 +1273,7 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     if (threadIdx.x == 0) {
         // Copy to shared memory
         int length = str_len(minRangePure);
-        shared_length = length;
+        shared_length = (length - 1) * 4;
         leftPad64(shared_minRange, minRangePure);
         leftPad64(shared_maxRange, maxRangePure);
         hex_string_to_bytes(target, shared_target, 20);
@@ -1468,9 +1292,9 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     hex_to_bigint(shared_maxRange, &max);
     
     // RANDOM ONLY ONCE: Generate initial position
-    uint64_t seed = clock64() ^ (tid * 0x9e3779b97f4a7c15ULL);
+    uint64_t seed = clock64() + tid;
     BigInt current_position;
-    generate_random_bigint_range_fast(&seed, &min, &max, &current_position);
+    
     
     // Pre-allocate working variables
     BigInt priv;
@@ -1480,138 +1304,81 @@ __global__ void start_optimized(const char* minRangePure, const char* maxRangePu
     uint8_t hash160_out[20];
     char binary[257];
     
-    // Deterministic step sizes for different movement patterns
-    // Using values that work with your existing bigint_add_uint32_range function
-    const uint64_t large_step = 999999999999999997ULL;  // Large prime for big jumps
-    const uint64_t medium_step = 111111111111111111ULL; // Your original step value
-    const uint64_t small_step = 1597;                    // Fibonacci prime for local exploration
-    
-    // Iteration counters
-    uint64_t global_iter = 0;
-    uint32_t pattern_phase = 0;
     int c = 0;
     const int length = shared_length;
-    const int inner_iterations = length - 4;
     // Main deterministic traversal loop
     while(g_found == 0) {
-        
-        // Convert current position to binary for transformations
+        generate_random_bigint_range_fast(&seed, &min, &max, &current_position);
+
         bigint_to_binary(&current_position, binary);
         
-        // Phase 1: Local binary pattern exploration (no randomness)
-        for(int inv = 0; inv < 2; inv++) {
-            #pragma unroll 2
-            for(int z = 0; z < 2; z++) {
-
-					// Core computation
-					binary_to_bigint_direct(binary, &priv);
-					
-					// EC operations
-					scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
-					jacobian_to_affine(&public_key, &result_jac);
-					coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
-					hash160(pubkey, 33, hash160_out);
-					
-					// Debug output only for first thread and iteration
-					if(__builtin_expect(tid == 0 && inv == 0 && z == 0, 0)) {
-						char hash160_str[41];
-						char hex_str[65];
-						hash160_to_hex(hash160_out, hash160_str);
-						bigint_to_hex(&priv, hex_str);
-						printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
-					}
-					
-					// Check for match using vectorized operations
-					bool match = true;
-					#pragma unroll 5
-					for(int i = 0; i < 20; i += 4) {
-						uint32_t* h = (uint32_t*)&hash160_out[i];
-						uint32_t* t = (uint32_t*)&shared_target[i];
-						if(*h != *t) {
-							match = false;
-							break;
-						}
-					}
-					
-					if(__builtin_expect(match, 0)) {
-						// Found a match - use atomic to ensure single winner
-						if (atomicCAS((int*)&g_found, 0, 1) == 0) {
-							char temp_hex[65];
+        for(int inv = 0; inv < 2; inv++)
+		{
+            for(int z = 0; z < 2; z++)
+			{
+				for(int y = 0; y < length; y++)
+				{
+					for(int x = 0; x < 16; x++)
+					{
+						// Core computation
+						binary_to_bigint_direct(binary, &priv);
+						
+						// EC operations
+						scalar_multiply_jac_device(&result_jac, &const_G_jacobian, &priv);
+						jacobian_to_affine(&public_key, &result_jac);
+						coords_to_compressed_pubkey(public_key.x, public_key.y, pubkey);
+						hash160(pubkey, 33, hash160_out);
+						
+						// Debug output only for first thread and iteration
+						if(__builtin_expect(tid == 0 && inv == 0 && z == 0 && y == 0 && x == 0, 0)) {
 							char hash160_str[41];
-							binary_to_hex(binary, temp_hex);
+							char hex_str[65];
 							hash160_to_hex(hash160_out, hash160_str);
-							
-							memcpy(g_found_hex, temp_hex, 65);
-							memcpy(g_found_hash160, hash160_str, 41);
-
-							printf("\n*** FOUND! ***\n");
-							printf("Private Key: %s\n", temp_hex);
-							printf("Hash160: %s\n", hash160_str);
+							bigint_to_hex(&priv, hex_str);
+							printf("%d - %s -> %s -> %s\n", c, binary, hex_str, hash160_str);
 						}
-						return; // Exit immediately
+						
+						// Check for match using vectorized operations
+						bool match = true;
+						#pragma unroll 5
+						for(int i = 0; i < 20; i += 4) {
+							uint32_t* h = (uint32_t*)&hash160_out[i];
+							uint32_t* t = (uint32_t*)&shared_target[i];
+							if(*h != *t) {
+								match = false;
+								break;
+							}
+						}
+						
+						if(__builtin_expect(match, 0))
+						{
+							// Found a match - use atomic to ensure single winner
+							if (atomicCAS((int*)&g_found, 0, 1) == 0) {
+								char temp_hex[65];
+								char hash160_str[41];
+								binary_to_hex(binary, temp_hex);
+								hash160_to_hex(hash160_out, hash160_str);
+								
+								memcpy(g_found_hex, temp_hex, 65);
+								memcpy(g_found_hash160, hash160_str, 41);
+
+								printf("\n*** FOUND! ***\n");
+								printf("Private Key: %s\n", temp_hex);
+								printf("Hash160: %s\n", hash160_str);
+							}
+							return; // Exit immediately
+						}
+						binary_vertical_rotate_up(binary);
 					}
+					binary_rotate_left_by_one(binary);
+				}
 				reverseBinaryAfterFirst1(binary);
-            }
-            invertBinaryAfterFirst1(binary);
-        }
-        
-        // Phase 2: Deterministic jump to next exploration region
-        // Use different step patterns to ensure good coverage
-        pattern_phase = (pattern_phase + 1) % 3;
-        
-        uint64_t step_size;
-        switch(pattern_phase) {
-            case 0:
-                // Large jumps - thread-specific to avoid collisions
-                step_size = large_step + (tid * 1000000007ULL);
-                break;
-            case 1:
-                // Medium jumps - using your original step value
-                step_size = medium_step;
-                break;
-            case 2:
-                // Small steps for local density - varies with iteration
-                step_size = small_step * ((global_iter % 89) + 1);
-                break;
-        }
-        
-        // Use your existing function to add and wrap within range
-        bigint_add_uint32_range(&current_position, step_size, &min, &max);
-        
-        // Additional deterministic variations every few iterations
-        if ((global_iter % 7) == 0) {
-            // Apply additional binary transformation to current position
-            bigint_to_binary(&current_position, binary);
-            
-            // Rotate based on thread ID to ensure different patterns per thread
-            for(int r = 0; r < (tid % 5) + 1; r++) {
-                binary_vertical_rotate_up(binary);
-            }
-            
-            binary_to_bigint_direct(binary, &current_position);
-            
-            // Ensure we're still in range after transformation
-            if(bigint_compare(&current_position, &max) > 0) {
-                current_position = min;  // Wrap to beginning
-            } else if(bigint_compare(&current_position, &min) < 0) {
-                current_position = max;  // Wrap to end
-            }
-        }
+			}
+			invertBinaryAfterFirst1(binary);
+		}
+		
         
         c++;
-        global_iter++;
-        
-        // Periodic progress report and early exit check
-        if((c & 0xFF) == 0) {
-            if(g_found) return;
-            
-            // Occasional progress output for debugging
-            if(tid == 0 && (c & 0xFFFF) == 0) {
-                char hex_str[65];
-                bigint_to_hex(&current_position, hex_str);
-                printf("Thread 0 iteration %d at position: %s\n", c, hex_str);
-            }
-        }
     }
 }
 int main(int argc, char* argv[]) {
@@ -1637,8 +1404,9 @@ int main(int argc, char* argv[]) {
         cudaSetDevice(device_id);
 
         std::cout << "Using CUDA device " << device_id << std::endl;
-        init_gpu_constants();
-        
+		init_gpu_constants();
+		precompute_G_kernel<<<1, 1>>>();
+        cudaDeviceSynchronize();
         // Allocate device memory for 3 strings
         char *d_param1, *d_param2, *d_param3;
         
