@@ -23,7 +23,7 @@ __constant__ BigInt const_p;
 __constant__ ECPointJac const_G_jacobian;
 __constant__ BigInt const_n;
 
-#define WINDOW_SIZE 4
+#define WINDOW_SIZE 16
 __device__ ECPointJac G_precomp[1 << WINDOW_SIZE];
 
 
@@ -163,9 +163,12 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     // Keep EXACT multiplication code that works
     uint64_t prod[16] = {0};
     
+    // Optimize: Use shared memory for better cache locality if available
     #pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
         uint64_t carry = 0;
+        uint32_t ai = a->data[i];  // Cache in register
+        
         #pragma unroll
         for (int j = 0; j < BIGINT_WORDS; j++) {
             uint32_t lo, hi;
@@ -173,7 +176,7 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
                 "mul.lo.u32 %0, %2, %3;\n\t"
                 "mul.hi.u32 %1, %2, %3;\n\t"
                 : "=r"(lo), "=r"(hi)
-                : "r"(a->data[i]), "r"(b->data[j])
+                : "r"(ai), "r"(b->data[j])  // Use cached value
             );
             uint64_t mul = ((uint64_t)hi << 32) | lo;
             uint64_t sum = prod[i + j] + mul + carry;
@@ -183,14 +186,14 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         prod[i + BIGINT_WORDS] += carry;
     }
     
-    // Convert to 32-bit array - keep exactly the same
+    // Convert to 32-bit array - keep exactly the same but unroll
     uint32_t prod32[16];
     #pragma unroll
     for (int i = 0; i < 16; i++) {
         prod32[i] = (uint32_t)(prod[i] & 0xFFFFFFFFULL);
     }
     
-    // Minor optimization: Combine L and H extraction with Rext initialization
+    // Optimize: Combine L and H extraction with Rext initialization
     uint32_t Rext[9];
     BigInt H;
     
@@ -201,9 +204,26 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     }
     Rext[8] = 0;
     
-    // Keep using your working helper functions
-    uint32_t H977[9] = {0};
-    multiply_bigint_by_const(&H, 977, H977);
+    // Optimize multiply_bigint_by_const with better PTX usage
+    uint32_t H977[9];
+    {
+        uint32_t carry = 0;
+        #pragma unroll
+        for (int i = 0; i < BIGINT_WORDS; i++) {
+            uint32_t lo, hi;
+            asm volatile(
+                "mad.lo.cc.u32 %0, %2, %3, %4;\n\t"  // lo = a*977 + carry (with carry out)
+                "madc.hi.u32 %1, %2, %3, 0;\n\t"     // hi = high(a*977) + carry in
+                : "=r"(lo), "=r"(hi)
+                : "r"(H.data[i]), "r"(977), "r"(carry)
+            );
+            H977[i] = lo;
+            carry = hi;
+        }
+        H977[8] = carry;
+    }
+    
+    // Use optimized add_9word
     add_9word(Rext, H977);
     
     uint32_t Hshift[9] = {0};
@@ -218,7 +238,20 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         Rext[8] = 0;
         
         uint32_t extra977[9] = {0}, extraShift[9] = {0};
-        multiply_bigint_by_const(&extraBI, 977, extra977);
+        
+        // Optimize: inline small multiply for single word
+        {
+            uint32_t lo, hi;
+            asm volatile(
+                "mul.lo.u32 %0, %2, %3;\n\t"
+                "mul.hi.u32 %1, %2, %3;\n\t"
+                : "=r"(lo), "=r"(hi)
+                : "r"(extraBI.data[0]), "r"(977)
+            );
+            extra977[0] = lo;
+            extra977[1] = hi;
+        }
+        
         shift_left_word(&extraBI, extraShift);
         
         #pragma unroll
@@ -231,7 +264,10 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
     
     // Final reduction - exactly the same
     BigInt R_temp;
-    convert_9word_to_bigint(Rext, &R_temp);
+    #pragma unroll
+    for (int i = 0; i < BIGINT_WORDS; i++) {
+        R_temp.data[i] = Rext[i];
+    }
     
     if (Rext[8] || compare_bigint(&R_temp, &const_p) >= 0) {
         ptx_u256Sub(&R_temp, &R_temp, &const_p);
@@ -402,82 +438,6 @@ __device__ void add_point_jac(ECPointJac *R, const ECPointJac *P, const ECPointJ
     R->infinity = false;
 }
 
-// Mixed Jacobian-Affine point addition (faster when Q is in affine coordinates)
-__device__ void add_point_mixed(ECPointJac *R, const ECPointJac *P, const ECPoint *Q) {
-    if (P->infinity) {
-        R->X = Q->x;
-        R->Y = Q->y;
-        init_bigint(&R->Z, 1);
-        R->infinity = Q->infinity;
-        return;
-    }
-    if (Q->infinity) {
-        point_copy_jac(R, P);
-        return;
-    }
-    
-    BigInt Z1Z1, U2, S2, H, R_big, H2, H3, U1H2, X3, Y3, Z3, temp;
-    
-    // Z1Z1 = Z1^2
-    mul_mod_device(&Z1Z1, &P->Z, &P->Z);
-    
-    // U2 = X2 * Z1Z1
-    mul_mod_device(&U2, &Q->x, &Z1Z1);
-    
-    // S2 = Y2 * Z1^3
-    mul_mod_device(&temp, &Z1Z1, &P->Z);
-    mul_mod_device(&S2, &Q->y, &temp);
-    
-    // Check if points are equal
-    if (compare_bigint(&P->X, &U2) == 0) {
-        if (compare_bigint(&P->Y, &S2) == 0) {
-            // Double the point
-            double_point_jac(R, P);
-            return;
-        } else {
-            // Points are inverses
-            point_set_infinity_jac(R);
-            return;
-        }
-    }
-    
-    // H = U2 - X1
-    sub_mod_device(&H, &U2, &P->X);
-    
-    // R = S2 - Y1
-    sub_mod_device(&R_big, &S2, &P->Y);
-    
-    // H2 = H^2
-    mul_mod_device(&H2, &H, &H);
-    
-    // H3 = H * H2
-    mul_mod_device(&H3, &H, &H2);
-    
-    // U1H2 = X1 * H2
-    mul_mod_device(&U1H2, &P->X, &H2);
-    
-    // X3 = R^2 - H3 - 2*U1H2
-    BigInt R2, two, twoU1H2;
-    mul_mod_device(&R2, &R_big, &R_big);
-    init_bigint(&two, 2);
-    mul_mod_device(&twoU1H2, &U1H2, &two);
-    sub_mod_device(&temp, &R2, &H3);
-    sub_mod_device(&X3, &temp, &twoU1H2);
-    
-    // Y3 = R*(U1H2 - X3) - Y1*H3
-    sub_mod_device(&temp, &U1H2, &X3);
-    mul_mod_device(&temp, &R_big, &temp);
-    mul_mod_device(&Y3, &P->Y, &H3);
-    sub_mod_device(&Y3, &temp, &Y3);
-    
-    // Z3 = Z1 * H
-    mul_mod_device(&Z3, &P->Z, &H);
-    
-    copy_bigint(&R->X, &X3);
-    copy_bigint(&R->Y, &Y3);
-    copy_bigint(&R->Z, &Z3);
-    R->infinity = false;
-}
 
 __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
     if (P->infinity) {
@@ -495,75 +455,51 @@ __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
     R->infinity = false;
 }
 
-// Alternative: More efficient bit extraction using word-level operations
+
 __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
-    // Find the highest non-zero bit
-    int highest_bit = BIGINT_WORDS * 32 - 1;
-    for (; highest_bit >= 0; highest_bit--) {
-        if (get_bit(scalar, highest_bit)) break;
-    }
-    
-    if (highest_bit < 0) {
-        point_set_infinity_jac(result);
-        return;
-    }
-    
+
+    const int NUM_WINDOWS = (BIGINT_WORDS * 32 + WINDOW_SIZE - 1) / WINDOW_SIZE; // ceil(256 / 4) = 64
+
     ECPointJac res;
-    point_set_infinity_jac(&res);
-    
-    // Process bits from highest to lowest
-    for (int i = highest_bit; i >= 0; i -= WINDOW_SIZE) {
-        // Determine actual window size for this iteration
-        int current_window_size = (i >= WINDOW_SIZE - 1) ? WINDOW_SIZE : (i + 1);
-        
-        // Double by current_window_size
+    point_set_infinity_jac(&res);  // Initialize result to point at infinity
+
+    for (int window = NUM_WINDOWS - 1; window >= 0; window--) {
+        // Perform WINDOW_SIZE doublings per window
         #pragma unroll
-        for (int j = 0; j < current_window_size; j++) {
+        for (int j = 0; j < WINDOW_SIZE; j++) {
             double_point_jac(&res, &res);
         }
-        
-        // Extract window value more efficiently
+
+        // Extract window bits
+        int bit_index = window * WINDOW_SIZE;
+        int word_idx = bit_index >> 5;        // bit_index / 32
+        int bit_offset = bit_index & 31;      // bit_index % 32
+
         int window_value = 0;
-        int start_bit = i - current_window_size + 1;
-        
-        // Extract bits using word-level operations when possible
-        if (current_window_size == WINDOW_SIZE && start_bit >= 0) {
-            int word_idx = start_bit >> 5;  // start_bit / 32
-            int bit_offset = start_bit & 31; // start_bit % 32
-            
-            if (word_idx < BIGINT_WORDS) {
-                if (bit_offset + WINDOW_SIZE <= 32) {
-                    // Window fits in single word
-                    uint32_t mask = (1U << WINDOW_SIZE) - 1;
-                    window_value = (scalar->data[word_idx] >> bit_offset) & mask;
-                } else {
-                    // Window spans two words
-                    uint32_t low_bits = scalar->data[word_idx] >> bit_offset;
-                    uint32_t high_bits = 0;
-                    if (word_idx + 1 < BIGINT_WORDS) {
-                        int remaining_bits = WINDOW_SIZE - (32 - bit_offset);
-                        uint32_t high_mask = (1U << remaining_bits) - 1;
-                        high_bits = scalar->data[word_idx + 1] & high_mask;
-                        high_bits <<= (32 - bit_offset);
-                    }
-                    window_value = low_bits | high_bits;
+        if (word_idx < BIGINT_WORDS) {
+            if (bit_offset + WINDOW_SIZE <= 32) {
+                // All bits in one word
+                window_value = (scalar->data[word_idx] >> bit_offset) & ((1U << WINDOW_SIZE) - 1);
+            } else {
+                // Bits span two words
+                int bits_in_first = 32 - bit_offset;
+                int bits_in_second = WINDOW_SIZE - bits_in_first;
+
+                uint32_t part1 = scalar->data[word_idx] >> bit_offset;
+                uint32_t part2 = 0;
+                if (word_idx + 1 < BIGINT_WORDS) {
+                    part2 = scalar->data[word_idx + 1] & ((1U << bits_in_second) - 1);
                 }
-            }
-        } else {
-            // Fallback to bit-by-bit extraction for irregular windows
-            for (int j = 0; j < current_window_size; j++) {
-                if (start_bit + j >= 0) {
-                    window_value |= get_bit(scalar, start_bit + j) << j;
-                }
+                window_value = (part2 << bits_in_first) | part1;
             }
         }
-        
-        // Add precomputed point if non-zero
-        if (window_value > 0 && window_value < (1 << WINDOW_SIZE)) {
+
+        // Add from precomputed table if window_value is non-zero
+        if (window_value > 0) {
             add_point_jac(&res, &res, &G_precomp[window_value]);
         }
     }
-    
+
     point_copy_jac(result, &res);
 }
 
