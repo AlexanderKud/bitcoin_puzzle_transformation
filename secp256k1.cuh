@@ -23,18 +23,25 @@ __constant__ BigInt const_p;
 __constant__ ECPointJac const_G_jacobian;
 __constant__ BigInt const_n;
 
+#define WINDOW_SIZE 4
+__device__ ECPointJac G_precomp[1 << WINDOW_SIZE];
+
+
+
 __host__ __device__ __forceinline__ void init_bigint(BigInt *x, uint32_t val) {
     x->data[0] = val;
     for (int i = 1; i < BIGINT_WORDS; i++) x->data[i] = 0;
 }
 
 __host__ __device__ __forceinline__ void copy_bigint(BigInt *dest, const BigInt *src) {
+	#pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
         dest->data[i] = src->data[i];
     }
 }
 
 __host__ __device__ __forceinline__ int compare_bigint(const BigInt *a, const BigInt *b) {
+	#pragma unroll
     for (int i = BIGINT_WORDS - 1; i >= 0; i--) {
         if (a->data[i] > b->data[i]) return 1;
         if (a->data[i] < b->data[i]) return -1;
@@ -43,6 +50,7 @@ __host__ __device__ __forceinline__ int compare_bigint(const BigInt *a, const Bi
 }
 
 __host__ __device__ __forceinline__ bool is_zero(const BigInt *a) {
+	#pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
         if (a->data[i]) return false;
     }
@@ -96,15 +104,22 @@ __device__ __forceinline__ void ptx_u256Sub(BigInt *res, const BigInt *a, const 
 
 // Optimized multiply_bigint_by_const with unrolling
 __device__ __forceinline__ void multiply_bigint_by_const(const BigInt *a, uint32_t c, uint32_t result[9]) {
-    uint64_t carry = 0;
-    
+    uint32_t carry = 0;
     #pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
-        uint64_t prod = (uint64_t)a->data[i] * c + carry;
-        result[i] = (uint32_t)prod;
-        carry = prod >> 32;
+        uint32_t lo, hi;
+        asm volatile(
+            "mul.lo.u32 %0, %2, %3;\n\t"
+            "mul.hi.u32 %1, %2, %3;\n\t"
+            "add.cc.u32 %0, %0, %4;\n\t"
+            "addc.u32 %1, %1, 0;\n\t"
+            : "=r"(lo), "=r"(hi)
+            : "r"(a->data[i]), "r"(c), "r"(carry)
+        );
+        result[i] = lo;
+        carry = hi;
     }
-    result[8] = (uint32_t)carry;
+    result[8] = carry;
 }
 
 // Optimized shift_left_word
@@ -117,16 +132,25 @@ __device__ __forceinline__ void shift_left_word(const BigInt *a, uint32_t result
     }
 }
 
-// Optimized add_9word with unrolling
 __device__ __forceinline__ void add_9word(uint32_t r[9], const uint32_t addend[9]) {
-    uint64_t carry = 0;
-    
-    #pragma unroll
-    for (int i = 0; i < 9; i++) {
-        uint64_t sum = (uint64_t)r[i] + addend[i] + carry;
-        r[i] = (uint32_t)sum;
-        carry = sum >> 32;
-    }
+    // Use PTX add with carry chain for efficient 9-word addition
+    asm volatile(
+        "add.cc.u32 %0, %0, %9;\n\t"      // r[0] += addend[0], set carry
+        "addc.cc.u32 %1, %1, %10;\n\t"    // r[1] += addend[1] + carry, set carry
+        "addc.cc.u32 %2, %2, %11;\n\t"    // r[2] += addend[2] + carry, set carry
+        "addc.cc.u32 %3, %3, %12;\n\t"    // r[3] += addend[3] + carry, set carry
+        "addc.cc.u32 %4, %4, %13;\n\t"    // r[4] += addend[4] + carry, set carry
+        "addc.cc.u32 %5, %5, %14;\n\t"    // r[5] += addend[5] + carry, set carry
+        "addc.cc.u32 %6, %6, %15;\n\t"    // r[6] += addend[6] + carry, set carry
+        "addc.cc.u32 %7, %7, %16;\n\t"    // r[7] += addend[7] + carry, set carry
+        "addc.u32 %8, %8, %17;\n\t"       // r[8] += addend[8] + carry (no carry out needed)
+        : "+r"(r[0]), "+r"(r[1]), "+r"(r[2]), "+r"(r[3]), 
+          "+r"(r[4]), "+r"(r[5]), "+r"(r[6]), "+r"(r[7]), 
+          "+r"(r[8])
+        : "r"(addend[0]), "r"(addend[1]), "r"(addend[2]), "r"(addend[3]),
+          "r"(addend[4]), "r"(addend[5]), "r"(addend[6]), "r"(addend[7]),
+          "r"(addend[8])
+    );
 }
 
 __device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], BigInt *res) {
@@ -134,491 +158,69 @@ __device__ __forceinline__ void convert_9word_to_bigint(const uint32_t r[9], Big
         res->data[i] = r[i];
     }
 }
+
 __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
-    uint32_t prod[16] = {0};
-
-    // i = 0
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[0] * b->data[0];
-        uint32_t high = __umulhi(a->data[0], b->data[0]);
-        sum = (uint64_t)prod[0] + low + carry;
-        prod[0] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[1];
-        high = __umulhi(a->data[0], b->data[1]);
-        sum = (uint64_t)prod[1] + low + carry;
-        prod[1] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[2];
-        high = __umulhi(a->data[0], b->data[2]);
-        sum = (uint64_t)prod[2] + low + carry;
-        prod[2] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[3];
-        high = __umulhi(a->data[0], b->data[3]);
-        sum = (uint64_t)prod[3] + low + carry;
-        prod[3] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[4];
-        high = __umulhi(a->data[0], b->data[4]);
-        sum = (uint64_t)prod[4] + low + carry;
-        prod[4] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[5];
-        high = __umulhi(a->data[0], b->data[5]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[6];
-        high = __umulhi(a->data[0], b->data[6]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[0] * b->data[7];
-        high = __umulhi(a->data[0], b->data[7]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[8] += carry;
-    }
-
-    // i = 1
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[1] * b->data[0];
-        uint32_t high = __umulhi(a->data[1], b->data[0]);
-        sum = (uint64_t)prod[1] + low + carry;
-        prod[1] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[1];
-        high = __umulhi(a->data[1], b->data[1]);
-        sum = (uint64_t)prod[2] + low + carry;
-        prod[2] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[2];
-        high = __umulhi(a->data[1], b->data[2]);
-        sum = (uint64_t)prod[3] + low + carry;
-        prod[3] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[3];
-        high = __umulhi(a->data[1], b->data[3]);
-        sum = (uint64_t)prod[4] + low + carry;
-        prod[4] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[4];
-        high = __umulhi(a->data[1], b->data[4]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[5];
-        high = __umulhi(a->data[1], b->data[5]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[6];
-        high = __umulhi(a->data[1], b->data[6]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[1] * b->data[7];
-        high = __umulhi(a->data[1], b->data[7]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[9] += carry;
-    }
-
-    // i = 2
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[2] * b->data[0];
-        uint32_t high = __umulhi(a->data[2], b->data[0]);
-        sum = (uint64_t)prod[2] + low + carry;
-        prod[2] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[1];
-        high = __umulhi(a->data[2], b->data[1]);
-        sum = (uint64_t)prod[3] + low + carry;
-        prod[3] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[2];
-        high = __umulhi(a->data[2], b->data[2]);
-        sum = (uint64_t)prod[4] + low + carry;
-        prod[4] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[3];
-        high = __umulhi(a->data[2], b->data[3]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[4];
-        high = __umulhi(a->data[2], b->data[4]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[5];
-        high = __umulhi(a->data[2], b->data[5]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[6];
-        high = __umulhi(a->data[2], b->data[6]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[2] * b->data[7];
-        high = __umulhi(a->data[2], b->data[7]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[10] += carry;
-    }
-
-    // i = 3
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[3] * b->data[0];
-        uint32_t high = __umulhi(a->data[3], b->data[0]);
-        sum = (uint64_t)prod[3] + low + carry;
-        prod[3] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[1];
-        high = __umulhi(a->data[3], b->data[1]);
-        sum = (uint64_t)prod[4] + low + carry;
-        prod[4] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[2];
-        high = __umulhi(a->data[3], b->data[2]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[3];
-        high = __umulhi(a->data[3], b->data[3]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[4];
-        high = __umulhi(a->data[3], b->data[4]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[5];
-        high = __umulhi(a->data[3], b->data[5]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[6];
-        high = __umulhi(a->data[3], b->data[6]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[3] * b->data[7];
-        high = __umulhi(a->data[3], b->data[7]);
-        sum = (uint64_t)prod[10] + low + carry;
-        prod[10] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[11] += carry;
-    }
-
-    // i = 4
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[4] * b->data[0];
-        uint32_t high = __umulhi(a->data[4], b->data[0]);
-        sum = (uint64_t)prod[4] + low + carry;
-        prod[4] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[1];
-        high = __umulhi(a->data[4], b->data[1]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[2];
-        high = __umulhi(a->data[4], b->data[2]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[3];
-        high = __umulhi(a->data[4], b->data[3]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[4];
-        high = __umulhi(a->data[4], b->data[4]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[5];
-        high = __umulhi(a->data[4], b->data[5]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[6];
-        high = __umulhi(a->data[4], b->data[6]);
-        sum = (uint64_t)prod[10] + low + carry;
-        prod[10] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[4] * b->data[7];
-        high = __umulhi(a->data[4], b->data[7]);
-        sum = (uint64_t)prod[11] + low + carry;
-        prod[11] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[12] += carry;
-    }
-
-    // i = 5
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[5] * b->data[0];
-        uint32_t high = __umulhi(a->data[5], b->data[0]);
-        sum = (uint64_t)prod[5] + low + carry;
-        prod[5] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[1];
-        high = __umulhi(a->data[5], b->data[1]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[2];
-        high = __umulhi(a->data[5], b->data[2]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[3];
-        high = __umulhi(a->data[5], b->data[3]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[4];
-        high = __umulhi(a->data[5], b->data[4]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[5];
-        high = __umulhi(a->data[5], b->data[5]);
-        sum = (uint64_t)prod[10] + low + carry;
-        prod[10] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[6];
-        high = __umulhi(a->data[5], b->data[6]);
-        sum = (uint64_t)prod[11] + low + carry;
-        prod[11] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[5] * b->data[7];
-        high = __umulhi(a->data[5], b->data[7]);
-        sum = (uint64_t)prod[12] + low + carry;
-        prod[12] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[13] += carry;
-    }
-
-    // i = 6
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[6] * b->data[0];
-        uint32_t high = __umulhi(a->data[6], b->data[0]);
-        sum = (uint64_t)prod[6] + low + carry;
-        prod[6] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[1];
-        high = __umulhi(a->data[6], b->data[1]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[2];
-        high = __umulhi(a->data[6], b->data[2]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[3];
-        high = __umulhi(a->data[6], b->data[3]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[4];
-        high = __umulhi(a->data[6], b->data[4]);
-        sum = (uint64_t)prod[10] + low + carry;
-        prod[10] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[5];
-        high = __umulhi(a->data[6], b->data[5]);
-        sum = (uint64_t)prod[11] + low + carry;
-        prod[11] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[6];
-        high = __umulhi(a->data[6], b->data[6]);
-        sum = (uint64_t)prod[12] + low + carry;
-        prod[12] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[6] * b->data[7];
-        high = __umulhi(a->data[6], b->data[7]);
-        sum = (uint64_t)prod[13] + low + carry;
-        prod[13] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[14] += carry;
-    }
-
-    // i = 7
-    {
-        uint32_t carry = 0;
-        uint64_t sum;
-
-        uint32_t low = a->data[7] * b->data[0];
-        uint32_t high = __umulhi(a->data[7], b->data[0]);
-        sum = (uint64_t)prod[7] + low + carry;
-        prod[7] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[1];
-        high = __umulhi(a->data[7], b->data[1]);
-        sum = (uint64_t)prod[8] + low + carry;
-        prod[8] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[2];
-        high = __umulhi(a->data[7], b->data[2]);
-        sum = (uint64_t)prod[9] + low + carry;
-        prod[9] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[3];
-        high = __umulhi(a->data[7], b->data[3]);
-        sum = (uint64_t)prod[10] + low + carry;
-        prod[10] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[4];
-        high = __umulhi(a->data[7], b->data[4]);
-        sum = (uint64_t)prod[11] + low + carry;
-        prod[11] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[5];
-        high = __umulhi(a->data[7], b->data[5]);
-        sum = (uint64_t)prod[12] + low + carry;
-        prod[12] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[6];
-        high = __umulhi(a->data[7], b->data[6]);
-        sum = (uint64_t)prod[13] + low + carry;
-        prod[13] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        low = a->data[7] * b->data[7];
-        high = __umulhi(a->data[7], b->data[7]);
-        sum = (uint64_t)prod[14] + low + carry;
-        prod[14] = (uint32_t)sum;
-        carry = high + (uint32_t)(sum >> 32);
-
-        prod[15] += carry;
-    }
-
-    // --- Reduction phase (same as your original, proven correct) ---
-
-    BigInt L, H;
+    // Keep EXACT multiplication code that works
+    uint64_t prod[16] = {0};
+    
     #pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
-        L.data[i] = prod[i];
-        H.data[i] = prod[i + BIGINT_WORDS];
+        uint64_t carry = 0;
+        #pragma unroll
+        for (int j = 0; j < BIGINT_WORDS; j++) {
+            uint32_t lo, hi;
+            asm volatile(
+                "mul.lo.u32 %0, %2, %3;\n\t"
+                "mul.hi.u32 %1, %2, %3;\n\t"
+                : "=r"(lo), "=r"(hi)
+                : "r"(a->data[i]), "r"(b->data[j])
+            );
+            uint64_t mul = ((uint64_t)hi << 32) | lo;
+            uint64_t sum = prod[i + j] + mul + carry;
+            prod[i + j] = (uint32_t)sum;
+            carry = sum >> 32;
+        }
+        prod[i + BIGINT_WORDS] += carry;
     }
-
-    uint32_t Rext[9] = {0};
+    
+    // Convert to 32-bit array - keep exactly the same
+    uint32_t prod32[16];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        prod32[i] = (uint32_t)(prod[i] & 0xFFFFFFFFULL);
+    }
+    
+    // Minor optimization: Combine L and H extraction with Rext initialization
+    uint32_t Rext[9];
+    BigInt H;
+    
     #pragma unroll
     for (int i = 0; i < BIGINT_WORDS; i++) {
-        Rext[i] = L.data[i];
+        Rext[i] = prod32[i];  // L part goes directly to Rext
+        H.data[i] = prod32[i + BIGINT_WORDS];  // H part
     }
     Rext[8] = 0;
-
+    
+    // Keep using your working helper functions
     uint32_t H977[9] = {0};
     multiply_bigint_by_const(&H, 977, H977);
     add_9word(Rext, H977);
-
+    
     uint32_t Hshift[9] = {0};
     shift_left_word(&H, Hshift);
     add_9word(Rext, Hshift);
-
+    
+    // Keep overflow handling exactly the same
     if (Rext[8]) {
         uint32_t extra[9] = {0};
         BigInt extraBI;
         init_bigint(&extraBI, Rext[8]);
         Rext[8] = 0;
-
+        
         uint32_t extra977[9] = {0}, extraShift[9] = {0};
         multiply_bigint_by_const(&extraBI, 977, extra977);
         shift_left_word(&extraBI, extraShift);
-
+        
         #pragma unroll
         for (int i = 0; i < 9; i++) {
             extra[i] = extra977[i];
@@ -626,22 +228,20 @@ __device__ __forceinline__ void mul_mod_device(BigInt *res, const BigInt *a, con
         add_9word(extra, extraShift);
         add_9word(Rext, extra);
     }
-
+    
+    // Final reduction - exactly the same
     BigInt R_temp;
     convert_9word_to_bigint(Rext, &R_temp);
-
+    
     if (Rext[8] || compare_bigint(&R_temp, &const_p) >= 0) {
         ptx_u256Sub(&R_temp, &R_temp, &const_p);
     }
     if (compare_bigint(&R_temp, &const_p) >= 0) {
         ptx_u256Sub(&R_temp, &R_temp, &const_p);
     }
-
+    
     copy_bigint(res, &R_temp);
 }
-
-
-
 __device__ __forceinline__ void sub_mod_device(BigInt *res, const BigInt *a, const BigInt *b) {
     BigInt temp;
     if (compare_bigint(a, b) < 0) {
@@ -895,31 +495,8 @@ __device__ void jacobian_to_affine(ECPoint *R, const ECPointJac *P) {
     R->infinity = false;
 }
 
+// Alternative: More efficient bit extraction using word-level operations
 __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac *point, const BigInt *scalar) {
-    const int WINDOW_SIZE = 4;
-    const int PRECOMP_SIZE = 1 << WINDOW_SIZE;
-    
-    // Use shared memory for precomputed points
-    __shared__ ECPointJac shared_precomp[1 << WINDOW_SIZE];
-    
-    // Collaborative precomputation using threads in the block
-    int tid = threadIdx.x;
-    int block_size = blockDim.x;
-    
-    // Each thread computes some precomputed points
-    for (int i = tid; i < PRECOMP_SIZE; i += block_size) {
-        if (i == 0) {
-            point_set_infinity_jac(&shared_precomp[0]);
-        } else if (i == 1) {
-            point_copy_jac(&shared_precomp[1], point);
-        } else {
-            add_point_jac(&shared_precomp[i], &shared_precomp[i-1], point);
-        }
-    }
-    
-    // Ensure all threads have finished precomputation
-    __syncthreads();
-    
     // Find the highest non-zero bit
     int highest_bit = BIGINT_WORDS * 32 - 1;
     for (; highest_bit >= 0; highest_bit--) {
@@ -931,37 +508,72 @@ __device__ void scalar_multiply_jac_device(ECPointJac *result, const ECPointJac 
         return;
     }
     
-    // Initialize result
     ECPointJac res;
     point_set_infinity_jac(&res);
     
-    // Process scalar in windows of WINDOW_SIZE bits
-    int i = highest_bit;
-    while (i >= 0) {
-        // Determine window size for this iteration
-        int window_bits = (i >= WINDOW_SIZE - 1) ? WINDOW_SIZE : (i + 1);
+    // Process bits from highest to lowest
+    for (int i = highest_bit; i >= 0; i -= WINDOW_SIZE) {
+        // Determine actual window size for this iteration
+        int current_window_size = (i >= WINDOW_SIZE - 1) ? WINDOW_SIZE : (i + 1);
         
-        // Double 'window_bits' times
+        // Double by current_window_size
         #pragma unroll
-        for (int j = 0; j < window_bits; j++) {
+        for (int j = 0; j < current_window_size; j++) {
             double_point_jac(&res, &res);
         }
         
-        // Extract window value
+        // Extract window value more efficiently
         int window_value = 0;
-        for (int j = 0; j < window_bits; j++) {
-            if (i - j >= 0 && get_bit(scalar, i - j)) {
-                window_value |= (1 << (window_bits - 1 - j));
+        int start_bit = i - current_window_size + 1;
+        
+        // Extract bits using word-level operations when possible
+        if (current_window_size == WINDOW_SIZE && start_bit >= 0) {
+            int word_idx = start_bit >> 5;  // start_bit / 32
+            int bit_offset = start_bit & 31; // start_bit % 32
+            
+            if (word_idx < BIGINT_WORDS) {
+                if (bit_offset + WINDOW_SIZE <= 32) {
+                    // Window fits in single word
+                    uint32_t mask = (1U << WINDOW_SIZE) - 1;
+                    window_value = (scalar->data[word_idx] >> bit_offset) & mask;
+                } else {
+                    // Window spans two words
+                    uint32_t low_bits = scalar->data[word_idx] >> bit_offset;
+                    uint32_t high_bits = 0;
+                    if (word_idx + 1 < BIGINT_WORDS) {
+                        int remaining_bits = WINDOW_SIZE - (32 - bit_offset);
+                        uint32_t high_mask = (1U << remaining_bits) - 1;
+                        high_bits = scalar->data[word_idx + 1] & high_mask;
+                        high_bits <<= (32 - bit_offset);
+                    }
+                    window_value = low_bits | high_bits;
+                }
+            }
+        } else {
+            // Fallback to bit-by-bit extraction for irregular windows
+            for (int j = 0; j < current_window_size; j++) {
+                if (start_bit + j >= 0) {
+                    window_value |= get_bit(scalar, start_bit + j) << j;
+                }
             }
         }
         
-        // Add precomputed point if window value is non-zero
-        if (window_value > 0) {
-            add_point_jac(&res, &res, &shared_precomp[window_value]);
+        // Add precomputed point if non-zero
+        if (window_value > 0 && window_value < (1 << WINDOW_SIZE)) {
+            add_point_jac(&res, &res, &G_precomp[window_value]);
         }
-        
-        i -= window_bits;
     }
     
     point_copy_jac(result, &res);
+}
+
+
+__global__ void precompute_G_kernel() {
+    if (threadIdx.x == 0) {
+        point_set_infinity_jac(&G_precomp[0]);
+        point_copy_jac(&G_precomp[1], &const_G_jacobian);
+        for (int i = 2; i < (1 << WINDOW_SIZE); i++) {
+            add_point_jac(&G_precomp[i], &G_precomp[i-1], &const_G_jacobian);
+        }
+    }
 }

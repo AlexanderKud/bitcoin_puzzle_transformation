@@ -1260,6 +1260,7 @@ __device__ void bigint_add_uint32_range(BigInt* bigint, uint32_t step,
         carry = (uint32_t)(sum >> 32);
     }
 }
+
 __global__ void start_optimized(const char* minRangePure, const char* maxRangePure, const char* target) {
     // Use shared memory for frequently accessed data
     __shared__ uint8_t shared_target[20];
